@@ -3,14 +3,14 @@ const POW_2_24 = 5.960464477539063e-8,
     POW_2_53 = 9007199254740992;
 
 function encode(value) {
-    const data = new ArrayBuffer(256);
-    const dataView = new DataView(data);
+    let data = new ArrayBuffer(256);
+    let dataView = new DataView(data);
     let lastLength;
     let offset = 0;
 
     function prepareWrite(length) {
-        const newByteLength = data.byteLength;
-        const requiredLength = offset + length;
+        let newByteLength = data.byteLength;
+        let requiredLength = offset + length;
         while (newByteLength < requiredLength)
             newByteLength <<= 1;
         if (newByteLength !== data.byteLength) {
@@ -18,7 +18,7 @@ function encode(value) {
             data = new ArrayBuffer(newByteLength);
             dataView = new DataView(data);
             const uint32count = (offset + 3) >> 2;
-            for (const i = 0; i < uint32count; ++i)
+            for (let i = 0; i < uint32count; ++i)
                 dataView.setUint32(i << 2, oldDataView.getUint32(i << 2));
         }
 
@@ -36,7 +36,7 @@ function encode(value) {
     }
     function writeUint8Array(value) {
         const dataView = prepareWrite(value.length);
-        for (const i = 0; i < value.length; ++i)
+        for (let i = 0; i < value.length; ++i)
             dataView.setUint8(offset + i, value[i]);
         commitWrite();
     }
@@ -97,8 +97,8 @@ function encode(value) {
 
             case "string":
                 const utf8data = [];
-                for (i = 0; i < value.length; ++i) {
-                    const charCode = value.charCodeAt(i);
+                for (let i = 0; i < value.length; ++i) {
+                    let charCode = value.charCodeAt(i);
                     if (charCode < 0x80) {
                         utf8data.push(charCode);
                     } else if (charCode < 0x800) {
@@ -133,6 +133,12 @@ function encode(value) {
                 } else if (value instanceof Uint8Array) {
                     writeTypeAndLength(2, value.length);
                     writeUint8Array(value);
+                } else if (value instanceof Map) {
+                    writeTypeAndLength(5, value.size);
+                    for (const [mapKey, mapValue] of value.entries()) {
+                        encodeItem(mapKey);
+                        encodeItem(mapValue);
+                    }
                 } else {
                     const keys = Object.keys(value);
                     length = keys.length;
@@ -153,7 +159,7 @@ function encode(value) {
 
     const ret = new ArrayBuffer(offset);
     const retView = new DataView(ret);
-    for (const i = 0; i < offset; ++i)
+    for (let i = 0; i < offset; ++i)
         retView.setUint8(i, dataView.getUint8(i));
     return ret;
 }
@@ -180,7 +186,7 @@ function decode(data, tagger, simpleValue) {
         const value = readUint16();
 
         const sign = value & 0x8000;
-        const exponent = value & 0x7c00;
+        let exponent = value & 0x7c00;
         const fraction = value & 0x03ff;
 
         if (exponent === 0x7c00)
@@ -243,8 +249,8 @@ function decode(data, tagger, simpleValue) {
     }
 
     function appendUtf16Data(utf16data, length) {
-        for (const i = 0; i < length; ++i) {
-            const value = readUint8();
+        for (let i = 0; i < length; ++i) {
+            let value = readUint8();
             if (value & 0x80) {
                 if (value < 0xe0) {
                     value = (value & 0x1f) << 6
@@ -304,13 +310,13 @@ function decode(data, tagger, simpleValue) {
             case 2:
                 if (length < 0) {
                     const elements = [];
-                    const fullArrayLength = 0;
+                    let fullArrayLength = 0;
                     while ((length = readIndefiniteStringLength(majorType)) >= 0) {
                         fullArrayLength += length;
                         elements.push(readArrayBuffer(length));
                     }
                     const fullArray = new Uint8Array(fullArrayLength);
-                    const fullArrayOffset = 0;
+                    let fullArrayOffset = 0;
                     for (i = 0; i < elements.length; ++i) {
                         fullArray.set(elements[i], fullArrayOffset);
                         fullArrayOffset += elements[i].length;
