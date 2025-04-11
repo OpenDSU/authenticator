@@ -160,7 +160,7 @@ function encode(value) {
 
 function decode(data, tagger, simpleValue) {
     const dataView = new DataView(data);
-    const offset = 0;
+    let offset = 0;
 
     if (typeof tagger !== "function")
         tagger = function (value) { return value; };
