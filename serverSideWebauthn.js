@@ -1,6 +1,15 @@
 const crypto = require('crypto');
-const { decode } = require('./cbor'); 
-const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose'); 
+const { decode } = require('./cbor.js'); 
+const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose.js'); 
+const asn1 = require('./asn1/asn1.js'); // Use the local asn1.js library
+
+// Define the ASN.1 structure for an ECDSA signature
+const EcdsaSigAsn1 = asn1.define('EcdsaSig', function() {
+  this.seq().obj(
+    this.key('r').int(),
+    this.key('s').int()
+  );
+});
 
 // --- Utility Functions ---
 
@@ -15,6 +24,15 @@ function base64urlToBuffer(base64urlString) {
     // Pad out with standard base64 required padding characters
     const padded = base64.padEnd(base64.length + (4 - base64.length % 4) % 4, '=');
     return Buffer.from(padded, 'base64');
+}
+
+/**
+ * Converts a Buffer to a Base64URL string.
+ * @param {Buffer} buffer
+ * @returns {string}
+ */
+function bufferToBase64url(buffer) {
+    return buffer.toString('base64url');
 }
 
 /**
@@ -283,18 +301,18 @@ function convertCoseKeyToJwk(coseKeyDetails) {
         crv: '',
         x: '',
         y: '',
-        alg: getJwkAlg(coseKeyDetails.alg) // Map COSE alg to JWK/JWA alg name if needed
+        use: 'sig' // Keep use parameter
     };
 
     if (coseKeyDetails.kty === COSE_KEY_TYPES.EC2) {
         jwk.kty = 'EC';
         jwk.crv = getJwkCurve(coseKeyDetails.crv);
-        jwk.x = coseKeyDetails.x.toString('base64url');
-        jwk.y = coseKeyDetails.y.toString('base64url');
+        jwk.x = Buffer.from(coseKeyDetails.x).toString('base64url');
+        jwk.y = Buffer.from(coseKeyDetails.y).toString('base64url');
     } else if (coseKeyDetails.kty === COSE_KEY_TYPES.OKP) {
         jwk.kty = 'OKP';
         jwk.crv = getJwkCurve(coseKeyDetails.crv);
-        jwk.x = coseKeyDetails.x.toString('base64url');
+        jwk.x = Buffer.from(coseKeyDetails.x).toString('base64url');
         // OKP JWK doesn't use 'y'
         delete jwk.y;
     } else {
@@ -368,7 +386,7 @@ function getWebCryptoAlgName(coseAlg) {
  * @param {boolean} requireUserVerification - Whether UV flag must be set in authData.
  * @returns {Promise<object>} Information about the verified credential to be stored.
  * @throws {Error} If any verification step fails.
- */// Assuming 'cbor' package or fixed cbor.js
+ */
 async function verifyRegistrationResponse(credential, expectedChallenge, expectedOrigin, expectedRpId, requireUserVerification) {
     // Basic structure check
     if (!credential || !credential.id || !credential.rawId || !credential.response ||
@@ -529,66 +547,242 @@ async function verifyRegistrationResponse(credential, expectedChallenge, expecte
     };
 }
 
-
-// --- Example Usage (requires a running context like an Express route) ---
-
-/*
-async function handleRegistrationRequest(req, res) {
-    try {
-        const { credential } = req.body; // Assuming body parsing middleware is used
-
-        // Retrieve session/user data
-        const userId = req.session.userId; // Example: Get user ID from session
-        const expectedChallenge = req.session.challenge; // Get challenge stored in session
-        if (!userId || !expectedChallenge) {
-            return res.status(400).json({ error: 'User session or challenge missing.' });
-        }
-
-        // Get RP configuration
-        const expectedOrigin = 'https://your-domain.com'; // Load from config
-        const expectedRpId = 'your-domain.com';      // Load from config
-        const requireUserVerification = false; // Example policy
-
-        // Perform verification
-        const credentialInfoToStore = await verifyRegistrationResponse(
-            credential,
-            expectedChallenge,
-            expectedOrigin,
-            expectedRpId,
-            requireUserVerification
-        );
-
-        // Associate the credential with the user and save to DB
-        await database.saveCredential({
-            userId: userId,
-            credentialId: credentialInfoToStore.credentialId.toString('base64url'), // Store as base64url string often easier
-            publicKey: credentialInfoToStore.credentialPublicKey.toString('base64'), // Store COSE key bytes (base64 standard encoding)
-            signCount: credentialInfoToStore.signCount,
-            aaguid: credentialInfoToStore.aaguid.toString('hex'),
-            transports: credentialInfoToStore.transports,
-            userVerified: credentialInfoToStore.userVerified,
-            attestationFormat: credentialInfoToStore.attestationFormat,
-            // Add timestamp, user agent, etc.
-        });
-
-        // Clear challenge from session
-        delete req.session.challenge;
-
-        res.status(200).json({ success: true, message: 'Registration successful!' });
-
-    } catch (error) {
-        console.error('Registration failed:', error);
-        // Clear challenge from session on failure too
-        if(req.session) delete req.session.challenge;
-        res.status(400).json({ error: error.message || 'Registration verification failed.' });
+/**
+ * Parses Authenticator Data for assertions (login).
+ * Does NOT include attested credential data checks.
+ * @param {Buffer} authDataBuffer
+ * @param {string} expectedRpId
+ * @param {boolean} requireUserVerification
+ * @returns {{rpIdHash: Buffer, flags: {up: boolean, uv: boolean, at: boolean, ed: boolean}, signCount: number}}
+ * @throws {Error}
+ */
+function parseAssertionAuthenticatorData(authDataBuffer, expectedRpId, requireUserVerification) {
+    if (authDataBuffer.byteLength < 37) { // rpIdHash (32) + flags (1) + signCount (4)
+        throw new Error(`Authenticator data is too short for assertion. Expected >= 37 bytes, got ${authDataBuffer.byteLength}`);
     }
+
+    const rpIdHash = authDataBuffer.subarray(0, 32);
+    const flagsByte = authDataBuffer.readUInt8(32);
+    const signCount = authDataBuffer.readUInt32BE(33); // 4 bytes counter
+
+    // Verify RP ID Hash
+    const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
+    if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
+        throw new Error(`RP ID hash mismatch during assertion. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+    }
+
+    // Parse Flags
+    const flags = {
+        up: !!(flagsByte & 0x01), // User Present
+        uv: !!(flagsByte & 0x04), // User Verified
+        // AT (0x40) and ED (0x80) flags might be present but are less critical for assertion logic itself
+        at: !!(flagsByte & 0x40), // Attested credential data included (Should be false for assertion?)
+        ed: !!(flagsByte & 0x80), // Extension data included
+    };
+    console.log('Parsed Assertion Flags:', flags);
+    console.log('Assertion Sign Count:', signCount);
+
+    // Verify Flags
+    if (!flags.up) {
+        // While UP=false is possible in some scenarios (e.g., U2F HID authenticators without presence test), 
+        // most modern WebAuthn flows require user presence.
+        // Depending on policy, you might allow this, but generally it's required.
+        console.warn('User Presence flag (UP) was not set during assertion. This might be acceptable depending on policy and authenticator type.');
+        // For stricter security, uncomment the line below:
+        // throw new Error('User Presence flag (UP) was not set during assertion.');
+    }
+    if (requireUserVerification && !flags.uv) {
+        // This check depends on the RP's policy for this specific login
+        throw new Error('User Verification flag (UV) was required for assertion but not set.');
+    }
+
+    // Note: We don't parse AAGUID, Credential ID, or Public Key here,
+    // as they are not part of the authenticatorData during assertion.
+    // Extension data parsing would happen after offset 37 if flags.ed is true.
+
+    return {
+        rpIdHash,
+        flags,
+        signCount,
+        // extensions // Add if parsed
+    };
 }
-*/
+
+/**
+ * Verifies the response from navigator.credentials.get()
+ *
+ * @param {object} assertion - The PublicKeyCredential object received from the client (JSON parsed, ArrayBuffers base64url encoded).
+ * @param {object} storedCredential - The stored credential information for the given credential ID (needs { credentialId: Buffer, credentialPublicKey: Buffer, signCount: number }).
+ * @param {string} expectedChallenge - The base64url encoded challenge originally sent to the client.
+ * @param {string} expectedOrigin - The expected origin (e.g., 'https://example.com').
+ * @param {string} expectedRpId - The expected Relying Party ID (e.g., 'example.com').
+ * @param {boolean} requireUserVerification - Whether UV flag must be set in authData for this assertion.
+ * @returns {Promise<object>} Information about the verified assertion (e.g., new sign count).
+ * @throws {Error} If any verification step fails.
+ */
+async function verifyAssertionResponse(assertion, storedCredential, expectedChallenge, expectedOrigin, expectedRpId, requireUserVerification) {
+    // Basic structure check
+    if (!assertion || !assertion.id || !assertion.rawId || !assertion.response ||
+        !assertion.response.authenticatorData || !assertion.response.clientDataJSON ||
+        !assertion.response.signature || assertion.type !== 'public-key') {
+        throw new Error('Invalid assertion structure received.');
+    }
+
+    console.log('Starting assertion verification...');
+    console.log('Expected Challenge:', expectedChallenge);
+    console.log('Expected Origin:', expectedOrigin);
+    console.log('Expected RP ID:', expectedRpId);
+    console.log('Stored Credential ID:', bufferToBase64url(storedCredential.credentialId));
+
+    // 1. Decode necessary inputs from Base64URL
+    const rawIdBuffer = base64urlToBuffer(assertion.rawId);
+    const clientDataJSONBuffer = base64urlToBuffer(assertion.response.clientDataJSON);
+    const authenticatorDataBuffer = base64urlToBuffer(assertion.response.authenticatorData);
+    const signatureBuffer = base64urlToBuffer(assertion.response.signature);
+
+    // Verify credential ID matches the one stored
+    if (!bufferEqual(rawIdBuffer, storedCredential.credentialId)) {
+        throw new Error(`Credential ID mismatch. Expected ${bufferToBase64url(storedCredential.credentialId)}, got ${bufferToBase64url(rawIdBuffer)}`);
+    }
+    console.log('Credential ID verified.');
+
+    // 2. Parse and verify clientDataJSON
+    console.log('\n--- Verifying clientDataJSON ---');
+    let clientData;
+    try {
+        const clientDataString = clientDataJSONBuffer.toString('utf8');
+        clientData = JSON.parse(clientDataString);
+    } catch (e) {
+        throw new Error(`Failed to parse clientDataJSON: ${e.message}`);
+    }
+    console.log('Parsed clientData:', clientData);
+
+    if (clientData.type !== 'webauthn.get') {
+        throw new Error(`Invalid clientData type. Expected 'webauthn.get', got '${clientData.type}'`);
+    }
+
+    // Compare challenge
+    const receivedChallengeBuffer = base64urlToBuffer(clientData.challenge);
+    const expectedChallengeBuffer = base64urlToBuffer(expectedChallenge);
+    if (!bufferEqual(receivedChallengeBuffer, expectedChallengeBuffer)) {
+        throw new Error('Challenge mismatch.');
+    }
+    console.log('Challenge verified.');
+
+    // Compare origin
+    if (clientData.origin !== expectedOrigin) {
+        throw new Error(`Origin mismatch. Expected '${expectedOrigin}', got '${clientData.origin}'`);
+    }
+    console.log('Origin verified.');
+
+    // 3. Parse authenticatorData
+    console.log('\n--- Verifying authenticatorData ---');
+    // Ensure authenticatorDataBuffer is a Buffer for parsing
+    const authDataForParsing = Buffer.from(authenticatorDataBuffer);
+    const parsedAuthData = parseAssertionAuthenticatorData(authDataForParsing, expectedRpId, requireUserVerification);
+
+    // 4. Verify Signature
+    console.log('\n--- Verifying Signature ---');
+    const clientDataHash = crypto.createHash('sha256').update(clientDataJSONBuffer).digest();
+    const dataToVerify = Buffer.concat([authDataForParsing, clientDataHash]);
+
+    // Decode the stored public key
+    let publicKeyDetails;
+    try {
+        const coseKeyMap = decodeCoseKey(storedCredential.credentialPublicKey); // Decode stored key
+        publicKeyDetails = getWebAuthnPublicKeyDetails(coseKeyMap);
+    } catch (e) {
+        throw new Error(`Failed to decode stored credentialPublicKey: ${e.message}`);
+    }
+
+    // Import public key for verification
+    const keyObject = await crypto.subtle.importKey(
+        'jwk',
+        convertCoseKeyToJwk(publicKeyDetails),
+        getJwkParams(publicKeyDetails.alg),
+        true,
+        ['verify']
+    );
+
+    // Perform verification - CONVERT SIGNATURE FORMAT FOR ECDSA
+    let signatureToVerify = signatureBuffer;
+    let verificationAlgorithm = getWebCryptoAlgName(publicKeyDetails.alg);
+
+    if (publicKeyDetails.kty === COSE_KEY_TYPES.EC2) {
+        // ECDSA signatures from WebAuthn are ASN.1 DER encoded, but WebCrypto expects raw r||s
+        let curveByteLength;
+        switch (publicKeyDetails.crv) {
+            case COSE_ELLIPTIC_CURVES.P_256: curveByteLength = 32; break;
+            case COSE_ELLIPTIC_CURVES.P_384: curveByteLength = 48; break;
+            case COSE_ELLIPTIC_CURVES.P_521: curveByteLength = 66; break; // Note: P-521 uses 66 bytes
+            default: throw new Error(`Unsupported EC curve for signature conversion: ${publicKeyDetails.crv}`);
+        }
+        try {
+            // Decode the ASN.1 DER signature using asn1.js
+            const decodedSig = EcdsaSigAsn1.decode(signatureBuffer, 'der');
+
+            // Get r and s as bignum instances
+            const rBn = decodedSig.r;
+            const sBn = decodedSig.s;
+
+            // Convert bignum to fixed-length buffers (BE, padded)
+            let rBa = rBn.toArrayLike(Buffer, 'be', curveByteLength);
+            let sBa = sBn.toArrayLike(Buffer, 'be', curveByteLength);
+
+            signatureToVerify = Buffer.concat([rBa, sBa]);
+            console.log(`Decoded ASN.1 DER signature using asn1.js library for curve length ${curveByteLength}.`);
+        } catch (asn1Error) {
+            throw new Error(`Failed to decode ASN.1 DER signature using asn1.js: ${asn1Error.message}`);
+        }
+    }
+    // For EdDSA or RSA, the format might be different or handled directly by WebCrypto
+
+    const signatureIsValid = await crypto.subtle.verify(
+        verificationAlgorithm, // Use the original algorithm object
+        keyObject,
+        signatureToVerify,    // Use the potentially converted signature
+        dataToVerify
+    );
+
+    if (!signatureIsValid) {
+        throw new Error("Assertion signature verification failed.");
+    }
+    console.log("Assertion signature verified successfully.");
+
+    // 5. Verify Signature Counter
+    console.log('\n--- Verifying Signature Counter ---');
+    const currentSignCount = parsedAuthData.signCount;
+    const lastSignCount = storedCredential.signCount; // From database/storage
+
+    console.log(`Stored Sign Count: ${lastSignCount}, Received Sign Count: ${currentSignCount}`);
+
+    // Check if counter is zero (and allow if last stored is also zero)
+    if (currentSignCount === 0 && lastSignCount === 0) {
+        console.log("Sign count is zero, accepted (both stored and received are 0).");
+        // This is common for new authenticators or those not supporting counters
+    } else if (currentSignCount <= lastSignCount) {
+        // Potentially a replay attack or cloned authenticator
+        throw new Error(`Invalid signature counter. Stored: ${lastSignCount}, Received: ${currentSignCount}. Possible replay attack.`);
+    }
+    console.log("Signature counter verified.");
+
+    // --- Verification Successful ---
+    console.log('\nAssertion verification successful!');
+
+    // 6. Return new sign count to be updated in storage
+    return {
+        newSignCount: currentSignCount,
+        userVerified: parsedAuthData.flags.uv // Pass back UV status from assertion
+    };
+}
 
 module.exports = {
     verifyRegistrationResponse,
-    base64urlToBuffer,
+    verifyAssertionResponse,
     parseAndVerifyAuthenticatorData,
+    parseAssertionAuthenticatorData,
     verifyAttestationStatement,
-    bufferEqual
+    bufferEqual,
+    base64urlToBuffer,
+    bufferToBase64url
 };

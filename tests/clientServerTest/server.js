@@ -7,11 +7,12 @@ const fs = require('fs');
 // --- Our WebAuthn Library ---
 const { 
     verifyRegistrationResponse,
+    verifyAssertionResponse,
     base64urlToBuffer,
-    parseAndVerifyAuthenticatorData,
-    verifyAttestationStatement,
+    bufferToBase64url,
+    parseAssertionAuthenticatorData,
     bufferEqual 
-} = require('../../serverSideRegistration');
+} = require('../../serverSideWebauthn');
 
 // --- Configuration (Should be securely configured in production) ---
 const rpId = 'localhost'; // Relying Party ID - Must match the domain
@@ -20,9 +21,11 @@ const expectedOrigin = 'http://localhost:3000'; // Expected origin of the reques
 
 // --- Mock In-Memory Database ---
 // Store user challenges temporarily and registered credentials
-const challengeStore = new Map(); // In-memory store for challenges { userId: challengeBuffer }
+const challengeStore = new Map(); // In-memory store for challenges { userId_or_loginToken: challengeBuffer }
 const credentialStore = new Map(); // In-memory store for credentials { userId: [credentialInfo, ...] }
 const userStore = new Map(); // Store basic user info { userId: { id: userId, name: userName, displayName: userDisplayName } }
+// Store usernames -> userId mapping for simple login lookup
+const usernameToUserId = new Map(); 
 
 // Simple function to generate user ID
 function generateUserId() {
@@ -33,15 +36,6 @@ function generateUserId() {
 function generateChallenge() {
     return crypto.randomBytes(32); // 32 bytes is recommended
 }
-
-// Helper to convert Buffer to base64url
-function bufferToBase64url(buffer) {
-    return buffer.toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=/g, '');
-}
-
 
 // --- HTTP Server Logic ---
 const server = http.createServer(async (req, res) => {
@@ -62,6 +56,7 @@ const server = http.createServer(async (req, res) => {
 
             const user = { id: userId, name: userName, displayName: userDisplayName };
             userStore.set(userId, user);
+            usernameToUserId.set(userName, userId); // Map username for login lookup
 
             const challengeBuffer = generateChallenge();
             challengeStore.set(userId, challengeBuffer); // Store challenge associated with user
@@ -82,12 +77,11 @@ const server = http.createServer(async (req, res) => {
                     { type: 'public-key', alg: -257 }, // RS256
                 ],
                 authenticatorSelection: {
-                    // authenticatorAttachment: 'cross-platform', // or 'platform'
                     requireResidentKey: false,
-                    userVerification: 'preferred', // 'required', 'preferred', 'discouraged'
+                    userVerification: 'required',
                 },
                 timeout: 60000,
-                attestation: 'direct' // 'none', 'indirect', 'direct'
+                attestation: 'direct' 
             };
 
             // Send back options and the temporary userId for the client to use
@@ -115,7 +109,7 @@ const server = http.createServer(async (req, res) => {
                     challengeStore.delete(userId); // Challenge should be used only once
 
                     // 2. Perform verification
-                    const requireUserVerification = false; // Policy decision
+                    const requireUserVerification = true; // Policy decision
                     const credentialInfo = await verifyRegistrationResponse(
                         credential,
                         expectedChallenge,
@@ -128,15 +122,11 @@ const server = http.createServer(async (req, res) => {
                     if (!credentialStore.has(userId)) {
                         credentialStore.set(userId, []);
                     }
-                    // Basic check for existing credential ID for this user (more robust needed in real app)
                     const existingUserCreds = credentialStore.get(userId);
                     const newCredIdB64 = bufferToBase64url(credentialInfo.credentialId);
                     if (existingUserCreds.some(c => bufferToBase64url(c.credentialId) === newCredIdB64)) {
                         console.warn(`Credential ID ${newCredIdB64} already registered for user ${userId}.`);
-                        // Decide how to handle - error or just ignore?
-                        // For demo, we'll allow it but log a warning.
                     }
-
                     existingUserCreds.push(credentialInfo);
                     console.log(`Credential stored successfully for user ${userId}:`, {
                         id: bufferToBase64url(credentialInfo.credentialId),
@@ -148,11 +138,143 @@ const server = http.createServer(async (req, res) => {
                     res.end(JSON.stringify({ success: true, message: 'Registration successful!' }));
 
                 } catch (error) {
-                    console.error('Registration verification failed:', error);
+                    console.error("Registration verification failed:", error);
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, error: error.message || 'Registration verification failed.' }));
                 }
             });
+
+        } else if (pathname === '/login/start' && method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                try {
+                    const { username } = JSON.parse(body); // Expect username to identify user
+                    if (!username) {
+                        throw new Error('Username missing in login start request.');
+                    }
+
+                    const userId = usernameToUserId.get(username);
+                    if (!userId) {
+                        throw new Error(`User '${username}' not found.`);
+                    }
+
+                    const userCredentials = credentialStore.get(userId) || [];
+
+                    // We only need to send allowed credential IDs
+                    const allowCredentials = userCredentials.map(cred => ({
+                        type: 'public-key',
+                        id: bufferToBase64url(cred.credentialId),
+                    }));
+
+                    const challengeBuffer = generateChallenge();
+                    const loginChallengeKey = `login_${userId}_${Date.now()}`;
+                    challengeStore.set(loginChallengeKey, challengeBuffer); // Store challenge
+
+                    const publicKeyCredentialRequestOptions = {
+                        challenge: bufferToBase64url(challengeBuffer),
+                        allowCredentials: allowCredentials,
+                        rpId: rpId,
+                        userVerification: 'required',
+                        timeout: 60000,
+                    };
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ options: publicKeyCredentialRequestOptions, challengeKey: loginChallengeKey }));
+
+                } catch (error) {
+                    console.error('Login start failed:', error);
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: error.message || 'Login start failed.' }));
+                }
+            });
+
+        } else if (pathname === '/login/finish' && method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                let challengeKey, assertion;
+                try {
+                    console.log('Received login finish request body:', body);
+                    let parsedBody = JSON.parse(body);
+                    challengeKey = parsedBody.challengeKey;
+                    assertion = parsedBody.assertion;
+                } catch (error) {
+                    console.error('Login finish request body parsing failed:', error);
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Invalid request body.' }));
+                    return;
+                }
+                try {
+                    
+
+                    if (!challengeKey || !assertion) {
+                        throw new Error('Missing challengeKey or assertion in request body.');
+                    }
+
+                    // 1. Get the challenge stored for this login attempt
+                    const expectedChallengeBuffer = challengeStore.get(challengeKey);
+                    if (!expectedChallengeBuffer) {
+                        throw new Error('No challenge found for this login attempt. Timed out or invalid.');
+                    }
+                    const expectedChallenge = bufferToBase64url(expectedChallengeBuffer);
+                    challengeStore.delete(challengeKey); // Challenge should be used only once
+
+                    // 2. Find the stored credential based on assertion.rawId
+                    const credentialIdToLookup = base64urlToBuffer(assertion.rawId);
+                    let userId = null;
+                    let storedCredential = null;
+
+                    for (const [uid, credentials] of credentialStore.entries()) {
+                        const foundCred = credentials.find(c => bufferEqual(c.credentialId, credentialIdToLookup));
+                        if (foundCred) {
+                            storedCredential = foundCred;
+                            userId = uid;
+                            break;
+                        }
+                    }
+
+                    if (!userId || !storedCredential) {
+                        throw new Error("Credential ID not recognized or user not found.");
+                    }
+                    const user = userStore.get(userId);
+                    if (!user) { throw new Error("User associated with credential not found."); }
+
+                    // 3. Verify the assertion response
+                    const requireUserVerification = true;
+                    const verificationResult = await verifyAssertionResponse(
+                        assertion,
+                        storedCredential,
+                        expectedChallenge,
+                        expectedOrigin,
+                        rpId,
+                        requireUserVerification
+                    );
+
+                    // 4. Update the stored signature counter
+                    storedCredential.signCount = verificationResult.newSignCount;
+                    console.log(`Updated sign count for credential ${assertion.id} to ${verificationResult.newSignCount}`);
+                    // In a real DB, you would SAVE the updated credentialStore entry here.
+
+                    // 5. Login successful - Establish session, etc.
+                    console.log(`User ${user.name} logged in successfully.`);
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        success: true,
+                        message: `Welcome ${user.name}!`,
+                        username: user.name,
+                        userVerified: verificationResult.userVerified
+                    }));
+
+                } catch (error) {
+                    console.error('Login verification failed:', error);
+                    challengeStore.delete(challengeKey); // Clean up challenge if verification fails
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: error.message || 'Login verification failed.' }));
+                }
+            });
+
         } else {
             // --- Static File Serving ---
             let filePath = '.' + req.url;

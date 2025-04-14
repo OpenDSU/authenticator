@@ -1,6 +1,6 @@
 const assert = require('assert');
 const crypto = require('crypto');
-const serverReg = require('../serverSideRegistration');
+const serverReg = require('../serverSideWebauthn');
 const cose = require('../cose');
 const cbor = require('../cbor');
 const { runTest, getTestSummary } = require('./utils');
