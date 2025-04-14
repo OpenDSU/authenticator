@@ -1,15 +1,7 @@
 const crypto = require('crypto');
 const { decode } = require('./cbor.js'); 
 const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose.js'); 
-const asn1 = require('./asn1/asn1.js'); // Use the local asn1.js library
-
-// Define the ASN.1 structure for an ECDSA signature
-const EcdsaSigAsn1 = asn1.define('EcdsaSig', function() {
-  this.seq().obj(
-    this.key('r').int(),
-    this.key('s').int()
-  );
-});
+const { decodeDerEncodedSignature } = require('./utils.js');
 
 // --- Utility Functions ---
 
@@ -719,17 +711,7 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
         }
         try {
             // Decode the ASN.1 DER signature using asn1.js
-            const decodedSig = EcdsaSigAsn1.decode(signatureBuffer, 'der');
-
-            // Get r and s as bignum instances
-            const rBn = decodedSig.r;
-            const sBn = decodedSig.s;
-
-            // Convert bignum to fixed-length buffers (BE, padded)
-            let rBa = rBn.toArrayLike(Buffer, 'be', curveByteLength);
-            let sBa = sBn.toArrayLike(Buffer, 'be', curveByteLength);
-
-            signatureToVerify = Buffer.concat([rBa, sBa]);
+            signatureToVerify = decodeDerEncodedSignature(signatureBuffer);
             console.log(`Decoded ASN.1 DER signature using asn1.js library for curve length ${curveByteLength}.`);
         } catch (asn1Error) {
             throw new Error(`Failed to decode ASN.1 DER signature using asn1.js: ${asn1Error.message}`);
