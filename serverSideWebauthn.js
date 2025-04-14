@@ -711,7 +711,7 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
         }
         try {
             // Decode the ASN.1 DER signature using asn1.js
-            signatureToVerify = decodeDerEncodedSignature(signatureBuffer);
+            signatureToVerify = decodeDerEncodedSignature(signatureBuffer, curveByteLength);
             console.log(`Decoded ASN.1 DER signature using asn1.js library for curve length ${curveByteLength}.`);
         } catch (asn1Error) {
             throw new Error(`Failed to decode ASN.1 DER signature using asn1.js: ${asn1Error.message}`);
