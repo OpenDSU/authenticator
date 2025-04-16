@@ -1,6 +1,6 @@
 const assert = require('assert');
 const cose = require('../cose');
-const cbor = require('../cbor');
+const cbor = require('../cbor/cbor');
 const { runTest, getTestSummary } = require('./utils');
 
 const exampleCoseKeyEC2Buffer = Buffer.from(cbor.encode(new Map([

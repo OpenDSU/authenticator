@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { decode } = require('./cbor.js'); 
+const { decode } = require('./cbor/cbor.js'); 
 const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose.js'); 
 const { decodeDerEncodedSignature } = require('./utils.js');
 
