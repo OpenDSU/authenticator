@@ -11,11 +11,7 @@ const { decodeDerEncodedSignature } = require('./utils.js');
  * @returns {Buffer}
  */
 function base64urlToBuffer(base64urlString) {
-    // Replace non-url compatible chars with base64 standard chars
-    const base64 = base64urlString.replace(/-/g, '+').replace(/_/g, '/');
-    // Pad out with standard base64 required padding characters
-    const padded = base64.padEnd(base64.length + (4 - base64.length % 4) % 4, '=');
-    return Buffer.from(padded, 'base64');
+    return Buffer.from(base64urlString, 'base64url');
 }
 
 /**
@@ -61,9 +57,14 @@ function parseAndVerifyAuthenticatorData(authDataBuffer, expectedRpId, requireUs
     const signCount = authDataBuffer.readUInt32BE(33); // 4 bytes counter
 
     // Verify RP ID Hash
-    const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
-    if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
-        throw new Error(`RP ID hash mismatch. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+    if (expectedRpId) {
+        const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
+        if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
+            throw new Error(`RP ID hash mismatch. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+        }
+        console.log('RP ID hash verified.');
+    } else {
+        console.log('Skipping RP ID hash verification as expectedRpId was not provided.');
     }
 
     // Parse Flags
@@ -414,19 +415,27 @@ async function verifyRegistrationResponse(credential, expectedChallenge, expecte
     }
 
     // Compare challenge (use buffer compare for security)
-    const receivedChallengeBuffer = base64urlToBuffer(clientData.challenge);
-    const expectedChallengeBuffer = base64urlToBuffer(expectedChallenge);
-    if (!bufferEqual(receivedChallengeBuffer, expectedChallengeBuffer)) {
-        throw new Error('Challenge mismatch.');
+    if (expectedChallenge) {
+        const receivedChallengeBuffer = base64urlToBuffer(clientData.challenge);
+        const expectedChallengeBuffer = base64urlToBuffer(expectedChallenge);
+        if (!bufferEqual(receivedChallengeBuffer, expectedChallengeBuffer)) {
+            throw new Error('Challenge mismatch.');
+        }
+        console.log('Challenge verified.');
+    } else {
+        console.log('Skipping challenge verification as expectedChallenge was not provided.');
     }
-    console.log('Challenge verified.');
 
     // Compare origin
-    if (clientData.origin !== expectedOrigin) {
-        // Handle variations like port numbers if necessary
-        throw new Error(`Origin mismatch. Expected '${expectedOrigin}', got '${clientData.origin}'`);
+    if (expectedOrigin) {
+        if (clientData.origin !== expectedOrigin) {
+            // Handle variations like port numbers if necessary
+            throw new Error(`Origin mismatch. Expected '${expectedOrigin}', got '${clientData.origin}'`);
+        }
+        console.log('Origin verified.');
+    } else {
+        console.log('Skipping origin verification as expectedOrigin was not provided.');
     }
-    console.log('Origin verified.');
 
     // Optional: Check tokenBinding field if used
 
@@ -558,9 +567,14 @@ function parseAssertionAuthenticatorData(authDataBuffer, expectedRpId, requireUs
     const signCount = authDataBuffer.readUInt32BE(33); // 4 bytes counter
 
     // Verify RP ID Hash
-    const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
-    if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
-        throw new Error(`RP ID hash mismatch during assertion. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+    if (expectedRpId) {
+        const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
+        if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
+            throw new Error(`RP ID hash mismatch during assertion. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+        }
+        console.log('Assertion RP ID hash verified.');
+    } else {
+        console.log('Skipping assertion RP ID hash verification as expectedRpId was not provided.');
     }
 
     // Parse Flags
