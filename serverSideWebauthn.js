@@ -638,17 +638,17 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
     console.log('Expected Challenge:', expectedChallenge);
     console.log('Expected Origin:', expectedOrigin);
     console.log('Expected RP ID:', expectedRpId);
-    console.log('Stored Credential ID:', bufferToBase64url(storedCredential.credentialId));
 
     // 1. Decode necessary inputs from Base64URL
     const rawIdBuffer = base64urlToBuffer(assertion.rawId);
     const clientDataJSONBuffer = base64urlToBuffer(assertion.response.clientDataJSON);
     const authenticatorDataBuffer = base64urlToBuffer(assertion.response.authenticatorData);
+    const publicKeyBuffer = base64urlToBuffer(storedCredential.publicKey);
     const signatureBuffer = base64urlToBuffer(assertion.response.signature);
 
     // Verify credential ID matches the one stored
-    if (!bufferEqual(rawIdBuffer, storedCredential.credentialId)) {
-        throw new Error(`Credential ID mismatch. Expected ${bufferToBase64url(storedCredential.credentialId)}, got ${bufferToBase64url(rawIdBuffer)}`);
+    if (assertion.id !== storedCredential.id) {
+        throw new Error(`Credential ID mismatch. Expected ${storedCredential.id}, got ${assertion.id}`);
     }
     console.log('Credential ID verified.');
 
@@ -668,9 +668,9 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
     }
 
     // Compare challenge
-    const receivedChallengeBuffer = base64urlToBuffer(clientData.challenge);
-    const expectedChallengeBuffer = base64urlToBuffer(expectedChallenge);
-    if (!bufferEqual(receivedChallengeBuffer, expectedChallengeBuffer)) {
+    // const receivedChallengeBuffer = base64urlToBuffer(clientData.challenge);
+    // const expectedChallengeBuffer = base64urlToBuffer(expectedChallenge);
+    if (clientData.challenge !== expectedChallenge) {
         throw new Error('Challenge mismatch.');
     }
     console.log('Challenge verified.');
@@ -695,7 +695,7 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
     // Decode the stored public key
     let publicKeyDetails;
     try {
-        const coseKeyMap = decodeCoseKey(storedCredential.credentialPublicKey); // Decode stored key
+        const coseKeyMap = decodeCoseKey(publicKeyBuffer); // Decode stored key
         publicKeyDetails = getWebAuthnPublicKeyDetails(coseKeyMap);
     } catch (e) {
         throw new Error(`Failed to decode stored credentialPublicKey: ${e.message}`);
