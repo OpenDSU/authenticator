@@ -240,6 +240,10 @@ const server = http.createServer(async (req, res) => {
                     const user = userStore.get(userId);
                     if (!user) { throw new Error("User associated with credential not found."); }
 
+                    // Add the properties expected by verifyAssertionResponse
+                    storedCredential.publicKey = storedCredential.credentialPublicKey;
+                    storedCredential.id = bufferToBase64url(storedCredential.credentialId);
+
                     // 3. Verify the assertion response
                     const requireUserVerification = true;
                     const verificationResult = await verifyAssertionResponse(
