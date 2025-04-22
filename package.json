@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "rm -rf asn1 && git clone https://github.com/OpenDSU/asn1.git && cd asn1 && npm install"
+    "postinstall": "rm -rf asn1 && git clone https://github.com/OpenDSU/asn1.git"
   },
   "dependencies": {},
   "author": "",
