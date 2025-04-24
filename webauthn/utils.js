@@ -1,5 +1,5 @@
 function decodeDerEncodedSignature(signatureBuffer, curveByteLength) {
-    const asn1 = require('./asn1/asn1.js'); // Use the local asn1.js library
+    const asn1 = require('../asn1/asn1.js'); // Use the local asn1.js library
 
     // Define the ASN.1 structure for an ECDSA signature
     const EcdsaSigAsn1 = asn1.define('EcdsaSig', function () {
