@@ -12,7 +12,7 @@ const {
     bufferToBase64url,
     parseAssertionAuthenticatorData,
     bufferEqual 
-} = require('../../serverSideWebauthn');
+} = require('../../index');
 
 // --- Configuration (Should be securely configured in production) ---
 const rpId = 'localhost'; // Relying Party ID - Must match the domain

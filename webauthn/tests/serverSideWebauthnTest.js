@@ -1,8 +1,8 @@
 const assert = require('assert');
 const crypto = require('crypto');
-const serverWebauthn = require('../serverSideWebauthn');
+const serverWebauthn = require('../index');
 const cose = require('../cose');
-const cbor = require('../cbor/cbor');
+const cbor = require('../cbor');
 const { runTest, getTestSummary } = require('./utils');
 
 const exampleCoseKeyEC2Buffer = Buffer.from(cbor.encode(new Map([

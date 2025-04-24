@@ -1,4 +1,4 @@
-const { decode, encode } = require('../cbor/cbor');
+const { decode, encode } = require('../cbor');
 
 const COSE_PARAMETERS = {
     // Header Parameters

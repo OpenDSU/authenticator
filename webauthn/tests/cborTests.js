@@ -1,5 +1,5 @@
 const assert = require('assert');
-const cbor = require('../cbor/cbor');
+const cbor = require('../cbor');
 const { runTest, getTestSummary } = require('./utils');
 
 function bufferLikeEqual(buf1, buf2) {
