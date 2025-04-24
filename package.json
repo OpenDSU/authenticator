@@ -1,5 +1,5 @@
 {
-  "name": "passkey",
+  "name": "authenticator",
   "version": "1.0.0",
   "description": "Project using local CBOR and ASN1 libraries",
   "main": "index.js",
