@@ -5,14 +5,71 @@ const path = require('path');
 const fs = require('fs');
 
 // --- Our WebAuthn Library ---
-const { 
+const {
     verifyRegistrationResponse,
     verifyAssertionResponse,
     base64urlToBuffer,
     bufferToBase64url,
-    parseAssertionAuthenticatorData,
-    bufferEqual 
+    bufferEqual
 } = require('../../index');
+
+// --- Load AAGUID to Authenticator Name Mapping from JSON file ---
+let authenticatorNameMap = {};
+try {
+    const mapFilePath = path.join(__dirname, 'authenticatorNameMap.json');
+    const mapData = fs.readFileSync(mapFilePath, 'utf8');
+    authenticatorNameMap = JSON.parse(mapData);
+    console.log(`Loaded ${Object.keys(authenticatorNameMap).length} authenticator mappings`);
+} catch (error) {
+    console.error('Error loading authenticatorNameMap.json:', error);
+    // Fallback to basic mapping if file can't be loaded
+    authenticatorNameMap = {
+        "00000000000000000000000000000000": "Software/Virtual Authenticator"
+    };
+}
+
+// Helper function to get authenticator info from the attestation statement
+function getAuthenticatorInfo(attestationObject) {
+    try {
+        // Decode the attestation object
+        const attestationBuffer = base64urlToBuffer(attestationObject);
+        const CBOR = require('../../cbor'); // You would need to add this dependency
+        const arrayBuffer = attestationBuffer instanceof ArrayBuffer
+            ? attestationBuffer
+            : new Uint8Array(attestationBuffer).buffer;
+
+        const attestation = CBOR.decode(arrayBuffer);
+        const authData = attestation.authData;
+
+        // Extract the AAGUID (starts at byte 37, 16 bytes long in the authenticator data)
+        const aaguidBuffer = authData.slice(37, 37 + 16);
+
+        // Format AAGUID as standard GUID with dashes (8-4-4-4-12 format)
+        // Convert to hex and insert dashes
+        const hex = Buffer.from(aaguidBuffer).toString('hex');
+        const aaguid = [
+            hex.slice(0, 8),
+            hex.slice(8, 12),
+            hex.slice(12, 16),
+            hex.slice(16, 20),
+            hex.slice(20, 32)
+        ].join('-');
+
+        // Get the name from our mapping
+        const name = authenticatorNameMap[aaguid] || "Unknown Authenticator";
+
+        return {
+            aaguid: aaguid,
+            name: name
+        };
+    } catch (error) {
+        console.error("Error extracting authenticator info:", error);
+        return {
+            aaguid: "unknown",
+            name: "Unknown Authenticator"
+        };
+    }
+}
 
 // --- Configuration (Should be securely configured in production) ---
 const rpId = 'localhost'; // Relying Party ID - Must match the domain
@@ -25,7 +82,7 @@ const challengeStore = new Map(); // In-memory store for challenges { userId_or_
 const credentialStore = new Map(); // In-memory store for credentials { userId: [credentialInfo, ...] }
 const userStore = new Map(); // Store basic user info { userId: { id: userId, name: userName, displayName: userDisplayName } }
 // Store usernames -> userId mapping for simple login lookup
-const usernameToUserId = new Map(); 
+const usernameToUserId = new Map();
 
 // Simple function to generate user ID
 function generateUserId() {
@@ -45,48 +102,99 @@ const server = http.createServer(async (req, res) => {
 
     console.log(`${method} ${pathname}`);
 
+    // Enable CORS for all requests
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    // Handle preflight requests
+    if (method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
     try {
         // --- API Endpoints ---
         if (pathname === '/register/start' && method === 'POST') {
-            // Simulate getting user info (e.g., from session or request body)
-            // For demo, we'll just create a new user each time
-            const userId = generateUserId();
-            const userName = `user_${userId.substring(0, 4)}`;
-            const userDisplayName = `Demo User ${userId.substring(0, 4)}`;
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                try {
+                    let username, userId, user;
 
-            const user = { id: userId, name: userName, displayName: userDisplayName };
-            userStore.set(userId, user);
-            usernameToUserId.set(userName, userId); // Map username for login lookup
+                    // Parse the request body to get the username
+                    try {
+                        const parsed = JSON.parse(body);
+                        username = parsed.username;
+                    } catch (e) {
+                        console.error("Error parsing request body:", e);
+                        // If no JSON body provided, create a new user
+                    }
 
-            const challengeBuffer = generateChallenge();
-            challengeStore.set(userId, challengeBuffer); // Store challenge associated with user
+                    // Check if this is an existing user
+                    if (username && usernameToUserId.has(username)) {
+                        userId = usernameToUserId.get(username);
+                        user = userStore.get(userId);
+                        console.log(`Using existing user: ${username} (${userId})`);
+                    } else {
+                        // Create a new user
+                        userId = generateUserId();
+                        username = username || `user_${userId.substring(0, 4)}`;
+                        const userDisplayName = `Demo User ${username}`;
 
-            const publicKeyCredentialCreationOptions = {
-                challenge: bufferToBase64url(challengeBuffer),
-                rp: {
-                    name: rpName,
-                    id: rpId,
-                },
-                user: {
-                    id: bufferToBase64url(Buffer.from(userId)), // User ID must be base64url encoded Buffer
-                    name: userName,
-                    displayName: userDisplayName,
-                },
-                pubKeyCredParams: [
-                    { type: 'public-key', alg: -7 }, // ES256
-                    { type: 'public-key', alg: -257 }, // RS256
-                ],
-                authenticatorSelection: {
-                    requireResidentKey: false,
-                    userVerification: 'required',
-                },
-                timeout: 60000,
-                attestation: 'direct' 
-            };
+                        user = { id: userId, name: username, displayName: userDisplayName };
+                        userStore.set(userId, user);
+                        usernameToUserId.set(username, userId); // Map username for login lookup
+                        console.log(`Created new user: ${username} (${userId})`);
+                    }
 
-            // Send back options and the temporary userId for the client to use
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ options: publicKeyCredentialCreationOptions, userId: userId }));
+                    const challengeBuffer = generateChallenge();
+                    challengeStore.set(userId, challengeBuffer); // Store challenge associated with user
+
+                    // Get existing credentials to exclude them
+                    const existingCredentials = credentialStore.get(userId) || [];
+                    const excludeCredentials = existingCredentials.map(cred => ({
+                        type: 'public-key',
+                        id: bufferToBase64url(cred.credentialId)
+                    }));
+
+                    const publicKeyCredentialCreationOptions = {
+                        challenge: bufferToBase64url(challengeBuffer),
+                        rp: {
+                            name: rpName,
+                            id: rpId,
+                        },
+                        user: {
+                            id: bufferToBase64url(Buffer.from(userId)), // User ID must be base64url encoded Buffer
+                            name: user.name,
+                            displayName: user.displayName,
+                        },
+                        pubKeyCredParams: [
+                            { type: 'public-key', alg: -7 }, // ES256
+                            { type: 'public-key', alg: -257 }, // RS256
+                        ],
+                        authenticatorSelection: {
+                            requireResidentKey: false,
+                            userVerification: 'required',
+                        },
+                        timeout: 60000,
+                        attestation: 'direct',
+                        excludeCredentials: excludeCredentials.length > 0 ? excludeCredentials : undefined
+                    };
+
+                    // Send back options and the temporary userId for the client to use
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        options: publicKeyCredentialCreationOptions,
+                        userId: userId
+                    }));
+                } catch (error) {
+                    console.error("Registration start error:", error);
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: error.message || 'Registration start failed.' }));
+                }
+            });
 
         } else if (pathname === '/register/finish' && method === 'POST') {
             let body = '';
@@ -127,15 +235,53 @@ const server = http.createServer(async (req, res) => {
                     if (existingUserCreds.some(c => bufferToBase64url(c.credentialId) === newCredIdB64)) {
                         console.warn(`Credential ID ${newCredIdB64} already registered for user ${userId}.`);
                     }
+
+                    // 4. Extract and store authenticator information
+                    let authenticatorInfo = {};
+                    try {
+                        if (credential.response.attestationObject) {
+                            // Try to get information from attestation
+                            authenticatorInfo = getAuthenticatorInfo(credential.response.attestationObject);
+                        }
+
+                        // Add authenticator attachment information if available
+                        if (credential.authenticatorAttachment) {
+                            authenticatorInfo.authenticatorAttachment = credential.authenticatorAttachment;
+                        }
+
+                        // Default if not detected
+                        if (!authenticatorInfo.authenticatorAttachment) {
+                            authenticatorInfo.authenticatorAttachment = 'platform'; // or 'cross-platform'
+                        }
+                    } catch (error) {
+                        console.error("Error extracting authenticator info:", error);
+                        authenticatorInfo = {
+                            authenticatorAttachment: credential.authenticatorAttachment || 'unknown',
+                            aaguid: 'unknown',
+                            name: 'Unknown Authenticator'
+                        };
+                    }
+
+                    // Add authenticator info to credential
+                    credentialInfo.authenticatorName = authenticatorInfo.name;
+                    credentialInfo.authenticatorAttachment = authenticatorInfo.authenticatorAttachment;
+                    credentialInfo.aaguid = authenticatorInfo.aaguid;
+                    credentialInfo.createdAt = Date.now();
+
                     existingUserCreds.push(credentialInfo);
                     console.log(`Credential stored successfully for user ${userId}:`, {
                         id: bufferToBase64url(credentialInfo.credentialId),
                         fmt: credentialInfo.attestationFormat,
-                        count: credentialInfo.signCount
+                        count: credentialInfo.signCount,
+                        authenticator: authenticatorInfo
                     });
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, message: 'Registration successful!' }));
+                    res.end(JSON.stringify({
+                        success: true,
+                        message: 'Registration successful!',
+                        authenticatorInfo: authenticatorInfo
+                    }));
 
                 } catch (error) {
                     console.error("Registration verification failed:", error);
@@ -206,7 +352,7 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
                 try {
-                    
+
 
                     if (!challengeKey || !assertion) {
                         throw new Error('Missing challengeKey or assertion in request body.');
@@ -276,6 +422,49 @@ const server = http.createServer(async (req, res) => {
                     challengeStore.delete(challengeKey); // Clean up challenge if verification fails
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, error: error.message || 'Login verification failed.' }));
+                }
+            });
+
+        } else if (pathname === '/user/credentials' && method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                try {
+                    const { username } = JSON.parse(body);
+                    if (!username) {
+                        throw new Error('Username missing in credentials request.');
+                    }
+
+                    const userId = usernameToUserId.get(username);
+                    if (!userId) {
+                        throw new Error(`User '${username}' not found.`);
+                    }
+
+                    const userCredentials = credentialStore.get(userId) || [];
+
+                    // Map credentials to a more client-friendly format
+                    const clientCredentials = userCredentials.map(cred => ({
+                        id: bufferToBase64url(cred.credentialId),
+                        authenticatorName: cred.authenticatorName || 'Unknown',
+                        authenticatorAttachment: cred.authenticatorAttachment || 'Unknown',
+                        aaguid: cred.aaguid || 'Unknown',
+                        createdAt: cred.createdAt || Date.now()
+                    }));
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        success: true,
+                        username: username,
+                        credentials: clientCredentials
+                    }));
+
+                } catch (error) {
+                    console.error('Error fetching user credentials:', error);
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        success: false,
+                        error: error.message || 'Failed to fetch credentials.'
+                    }));
                 }
             });
 

@@ -2,8 +2,11 @@
 const registerButton = document.getElementById('registerButton');
 const loginButton = document.getElementById('loginButton');
 const usernameInput = document.getElementById('username');
+const registerUsernameInput = document.getElementById('registerUsername');
 const messageDiv = document.getElementById('message');
 const loggedInUserDiv = document.getElementById('loggedInUser');
+const authenticatorInfoDiv = document.getElementById('authenticatorInfo');
+const credentialListDiv = document.getElementById('credentialList');
 
 // --- Helper Functions (from server, simplified for client) ---
 
@@ -24,14 +27,92 @@ function base64urlToBuffer(base64urlString) {
     return buffer.buffer; // Return ArrayBuffer
 }
 
+// Function to display user's registered authenticators
+async function displayUserCredentials() {
+    const username = registerUsernameInput.value;
+    if (!username) {
+        messageDiv.textContent = 'Please enter a username';
+        messageDiv.className = 'error';
+        return;
+    }
+
+    try {
+        messageDiv.textContent = `Fetching credentials for ${username}...`;
+
+        const response = await fetch('/user/credentials', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || response.statusText);
+        }
+
+        const { credentials } = await response.json();
+
+        if (!credentials || credentials.length === 0) {
+            credentialListDiv.innerHTML = '<p>No credentials registered for this user.</p>';
+            messageDiv.textContent = `No credentials found for ${username}`;
+            return;
+        }
+
+        let html = '<h3>Registered Authenticators</h3><ul class="credential-list">';
+        credentials.forEach(cred => {
+            // Determine authenticator type label
+            let typeLabel = 'Unknown';
+            if (cred.authenticatorAttachment === 'platform') {
+                typeLabel = 'Built-in Authenticator';
+            } else if (cred.authenticatorAttachment === 'cross-platform') {
+                typeLabel = 'External Authenticator';
+            }
+
+            html += `
+            <li class="credential-item">
+                <div class="credential-name">${cred.authenticatorName || 'Unknown Authenticator'}</div>
+                <div class="credential-details">
+                    <span class="credential-type">${typeLabel}</span>
+                    <span class="credential-date">Created: ${new Date(cred.createdAt).toLocaleString()}</span>
+                </div>
+                <div class="credential-aaguid">AAGUID: ${cred.aaguid}</div>
+            </li>`;
+        });
+        html += '</ul>';
+
+        credentialListDiv.innerHTML = html;
+        messageDiv.textContent = `Found ${credentials.length} credential(s) for ${username}`;
+        messageDiv.className = 'success';
+    } catch (err) {
+        console.error('Error fetching credentials:', err);
+        credentialListDiv.innerHTML = `<p class="error">Error: ${err.message}</p>`;
+        messageDiv.textContent = `Error: ${err.message}`;
+        messageDiv.className = 'error';
+    }
+}
+
 // --- Registration Logic ---
 registerButton.addEventListener('click', async () => {
+    const username = registerUsernameInput.value;
+    if (!username) {
+        messageDiv.textContent = 'Please enter a username for registration';
+        messageDiv.className = 'error';
+        return;
+    }
+
     messageDiv.textContent = 'Starting registration...';
     messageDiv.className = ''; // Clear previous styles
+    authenticatorInfoDiv.textContent = '';
+    authenticatorInfoDiv.style.display = 'none';
 
     try {
         // 1. Request registration options from the server
-        const startResponse = await fetch('/register/start', { method: 'POST' });
+        const startResponse = await fetch('/register/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username })
+        });
+
         if (!startResponse.ok) {
             const errorData = await startResponse.json();
             throw new Error(`Failed to start registration: ${errorData.error || startResponse.statusText}`);
@@ -39,7 +120,7 @@ registerButton.addEventListener('click', async () => {
         const { options: creationOptions, userId } = await startResponse.json();
 
         console.log('Received creation options:', creationOptions);
-        console.log('Using temporary User ID:', userId);
+        console.log('Using User ID:', userId);
 
         // 2. Prepare options for navigator.credentials.create()
         // Need to decode base64url fields back to ArrayBuffers
@@ -75,6 +156,11 @@ registerButton.addEventListener('click', async () => {
             credentialForServer.response.transports = credential.response.getTransports();
         }
 
+        // Include authenticator attachment if available
+        if (credential.authenticatorAttachment) {
+            credentialForServer.authenticatorAttachment = credential.authenticatorAttachment;
+        }
+
         // 5. Send credential to server for verification and storage
         const finishResponse = await fetch('/register/finish', {
             method: 'POST',
@@ -94,12 +180,27 @@ registerButton.addEventListener('click', async () => {
         messageDiv.textContent = 'Registration successful!';
         messageDiv.className = 'success';
 
+        // Display authenticator information
+        if (finishResult.authenticatorInfo) {
+            const info = finishResult.authenticatorInfo;
+            authenticatorInfoDiv.style.display = 'block';
+            authenticatorInfoDiv.innerHTML = `
+                <h3>Authenticator Information</h3>
+                <p><strong>Type:</strong> ${info.authenticatorAttachment || 'Unknown'}</p>
+                <p><strong>AAGUID:</strong> ${info.aaguid || 'Unknown'}</p>
+                <p><strong>Name:</strong> ${info.name || 'Unknown'}</p>
+            `;
+        }
+
+        // Update the credentials list
+        await displayUserCredentials();
+
     } catch (err) {
         console.error('Registration error:', err);
         messageDiv.textContent = `Error: ${err.message}`;
         messageDiv.className = 'error';
     }
-}); 
+});
 
 // --- Login Logic ---
 loginButton.addEventListener('click', async () => {
@@ -182,10 +283,13 @@ loginButton.addEventListener('click', async () => {
         console.error('Login error:', err);
         // Handle specific errors like "NotAllowedError" if the user cancels
         if (err.name === 'NotAllowedError') {
-             messageDiv.textContent = 'Login cancelled or no matching credentials found.';
+            messageDiv.textContent = 'Login cancelled or no matching credentials found.';
         } else {
             messageDiv.textContent = `Error: ${err.message}`;
         }
         messageDiv.className = 'error';
     }
-}); 
+});
+
+// Event listener for the credential list button
+document.getElementById('showCredentialsButton').addEventListener('click', displayUserCredentials); 

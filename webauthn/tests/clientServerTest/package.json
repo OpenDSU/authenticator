@@ -1,0 +1,13 @@
+{
+    "name": "webauthn-client-server-test",
+    "version": "1.0.0",
+    "description": "WebAuthn Client-Server Test Implementation with Multiple Passkeys",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+        "cbor": "^9.0.1"
+    }
+}
