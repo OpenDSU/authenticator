@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "rm -rf asn1 && git clone https://github.com/OpenDSU/asn1.git"
+    "postinstall": "rm -rf asn1 && git clone https://github.com/OpenDSU/asn1.git && cd webauthn && rm -rf jwt && git clone https://github.com/OpenDSU/jwt.git"
   },
   "dependencies": {},
   "author": "",

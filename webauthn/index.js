@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { decode } = require('./cbor/index.js'); 
 const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose/index.js'); 
 const { decodeDerEncodedSignature } = require('./utils.js');
+const jwt = require('./jwt');
 
 // --- Utility Functions ---
 
@@ -150,138 +151,323 @@ async function verifyAttestationStatement(fmt, attStmt, authDataBuffer, clientDa
 
     switch (fmt) {
         case 'none':
-            // 'none' format means no attestation is provided. Trust authData.
-            console.log("Attestation format is 'none'. Skipping signature verification.");
-            return true; // No verification possible/required
-
+            return await verifyNoneAttestation();
+            
         case 'packed':
-            // Can be self-attestation or basic/attCA attestation.
-            // Self-attestation: Signature using the *new* credential key over authData + clientDataHash.
-            // Basic/AttCA: Signature using an attestation key, certificate chain likely in `x5c`.
-            console.log("Processing 'packed' attestation format.");
-            const { alg: packedAlg, sig: packedSig, x5c: packedX5c } = attStmt;
-
-            if (!packedSig) {
-                throw new Error("Packed attestation statement missing 'sig'.");
-            }
-            if (packedAlg === undefined) { // alg is optional per spec if key provides it, but often present
-                console.warn("Packed attestation statement missing 'alg'. Will rely on public key alg.");
-            }
-
-            const dataToVerify = Buffer.concat([authDataBuffer, clientDataHash]);
-
-            if (packedX5c && Array.isArray(packedX5c) && packedX5c.length > 0) {
-                // --- Basic/AttCA Attestation ---
-                 throw new Error("Packed attestation with x5c (certificate chain) found. Full verification requires certificate parsing, chain validation, and checking against metadata. THIS IS NOT IMPLEMENTED HERE.");
-            } else {
-                // --- Self-Attestation ---
-                console.log("Attempting Packed Self-Attestation verification.");
-                // Verify the signature using the *credential's public key*.
-                // The algorithm should match the one in the credential public key.
-                const keyObject = await crypto.subtle.importKey(
-                    'jwk',
-                    convertCoseKeyToJwk(credentialPublicKeyDetails), // Need conversion helper
-                    getJwkParams(credentialPublicKeyDetails.alg), // Need conversion helper
-                    true,
-                    ['verify']
-                );
-
-                const signatureIsValid = await crypto.subtle.verify(
-                    getWebCryptoAlgName(credentialPublicKeyDetails.alg), // Need conversion helper
-                    keyObject,
-                    packedSig, // The signature from attStmt
-                    dataToVerify
-                );
-
-                if (!signatureIsValid) {
-                    throw new Error("Packed self-attestation signature verification failed.");
-                }
-                console.log("Packed self-attestation signature verified successfully.");
-                return true;
-            }
-
+            return await verifyPackedAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails);
+            
         case 'fido-u2f':
-            console.log("Processing 'fido-u2f' attestation format.");
-            const { sig: u2fSig, x5c: u2fX5c } = attStmt;
-
-            // 1. Verify attStmt structure
-            if (!u2fSig || !Buffer.isBuffer(u2fSig)) {
-                throw new Error("FIDO-U2F attestation statement missing or invalid 'sig'.");
-            }
-            if (!u2fX5c || !Array.isArray(u2fX5c) || u2fX5c.length < 1 || !Buffer.isBuffer(u2fX5c[0])) {
-                 throw new Error("FIDO-U2F attestation statement missing or invalid 'x5c' (certificate chain).");
-            }
-            console.log("FIDO-U2F structure validated (sig, x5c[0] present).");
-
-            // --- SECURITY WARNING: SIMPLIFIED IMPLEMENTATION ---
-            // 2. Parse leaf certificate from x5c[0] - SKIPPED.
-            // 3. Extract public key *from the certificate* - SKIPPED.
-            // We are INSECURELY using the public key from authData instead.
-            // A compliant implementation MUST extract the public key from the certificate
-            // and use that for verification. It also MUST validate the certificate chain.
-            // --- END SECURITY WARNING ---
-
-            // Ensure the key from authData is P-256 ECC as required by U2F
-            if (credentialPublicKeyDetails.kty !== COSE_KEY_TYPES.EC2 ||
-                credentialPublicKeyDetails.crv !== COSE_ELLIPTIC_CURVES.P_256 ||
-                credentialPublicKeyDetails.alg !== COSE_ALGORITHMS.ES256) {
-                throw new Error(`FIDO-U2F requires an ES256 P-256 public key in authData, but received different parameters (kty: ${credentialPublicKeyDetails.kty}, crv: ${credentialPublicKeyDetails.crv}, alg: ${credentialPublicKeyDetails.alg})`);
-            }
-
-            // 4. Construct specific U2F verification data buffer
-            // verificationData = 0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F
-            const reservedByte = Buffer.from([0x00]);
-            // Extract the P-256 public key point (uncompressed format: 0x04 || x || y)
-            const publicKeyU2F = Buffer.concat([
-                Buffer.from([0x04]), // Uncompressed point indicator
-                credentialPublicKeyDetails.x,
-                credentialPublicKeyDetails.y
-            ]);
-
-            const verificationData = Buffer.concat([
-                reservedByte,
-                rpIdHash,       // From authData
-                clientDataHash, // Calculated from clientDataJSON
-                credentialId,   // From authData
-                publicKeyU2F    // From authData public key (x, y coordinates)
-            ]);
-            console.log("Constructed U2F verification data.");
-
-            // 5. Verify 'sig' over verificationData using the *authData* public key (INSECURE SHORTCUT)
-            const keyObject = await crypto.subtle.importKey(
-                'jwk',
-                convertCoseKeyToJwk(credentialPublicKeyDetails), // Uses the key from authData
-                getJwkParams(COSE_ALGORITHMS.ES256), // U2F MUST use ES256
-                true,
-                ['verify']
-            );
-
-            const signatureIsValid = await crypto.subtle.verify(
-                getWebCryptoAlgName(COSE_ALGORITHMS.ES256), // U2F MUST use ES256
-                keyObject,
-                u2fSig,
-                verificationData
-            );
-
-            if (!signatureIsValid) {
-                throw new Error("FIDO-U2F signature verification failed (using authData key).");
-            }
-            console.log("FIDO-U2F signature verified successfully (using authData key - INSECURE).");
-
-            // 6. RECOMMENDED: Validate x5c chain against trusted roots - SKIPPED.
-            // Requires a Metadata Service and certificate validation logic.
-
-            return true; // Return true if signature verification passed (with the insecure key)
-
+            return await verifyFidoU2fAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails, rpIdHash, credentialId);
+            
         case 'tpm':
-            console.warn("Attestation format 'tpm' verification is complex and requires TPM-specific knowledge. THIS IS NOT IMPLEMENTED HERE.");
-            return true; // Placeholder
-
-        // Add cases for 'android-key', 'android-safetynet' if needed
+            return await verifyTpmAttestation();
+            
+        case 'android-safetynet':
+            return await verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash);
 
         default:
             throw new Error(`Unsupported attestation format: ${fmt}`);
     }
+}
+
+/**
+ * Verifies a 'none' attestation statement.
+ * @returns {Promise<boolean>} True as 'none' attestation requires no verification.
+ */
+async function verifyNoneAttestation() {
+    console.log("Attestation format is 'none'. Skipping signature verification.");
+    return true; // No verification possible/required
+}
+
+/**
+ * Verifies a 'packed' attestation statement.
+ * @param {object} attStmt - Attestation statement object.
+ * @param {Buffer} authDataBuffer - The raw authenticator data buffer.
+ * @param {Buffer} clientDataHash - SHA256 hash of the clientDataJSON.
+ * @param {object} credentialPublicKeyDetails - Decoded public key details.
+ * @returns {Promise<boolean>} True if verification is successful.
+ * @throws {Error} If verification fails.
+ */
+async function verifyPackedAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails) {
+    console.log("Processing 'packed' attestation format.");
+    const { alg: packedAlg, sig: packedSig, x5c: packedX5c } = attStmt;
+
+    if (!packedSig) {
+        throw new Error("Packed attestation statement missing 'sig'.");
+    }
+    if (packedAlg === undefined) { // alg is optional per spec if key provides it, but often present
+        console.warn("Packed attestation statement missing 'alg'. Will rely on public key alg.");
+    }
+
+    const dataToVerify = Buffer.concat([authDataBuffer, clientDataHash]);
+
+    if (packedX5c && Array.isArray(packedX5c) && packedX5c.length > 0) {
+        // --- Basic/AttCA Attestation ---
+         throw new Error("Packed attestation with x5c (certificate chain) found. Full verification requires certificate parsing, chain validation, and checking against metadata. THIS IS NOT IMPLEMENTED HERE.");
+    } else {
+        // --- Self-Attestation ---
+        console.log("Attempting Packed Self-Attestation verification.");
+        // Verify the signature using the *credential's public key*.
+        // The algorithm should match the one in the credential public key.
+        const keyObject = await crypto.subtle.importKey(
+            'jwk',
+            convertCoseKeyToJwk(credentialPublicKeyDetails), // Need conversion helper
+            getJwkParams(credentialPublicKeyDetails.alg), // Need conversion helper
+            true,
+            ['verify']
+        );
+
+        const signatureIsValid = await crypto.subtle.verify(
+            getWebCryptoAlgName(credentialPublicKeyDetails.alg), // Need conversion helper
+            keyObject,
+            packedSig, // The signature from attStmt
+            dataToVerify
+        );
+
+        if (!signatureIsValid) {
+            throw new Error("Packed self-attestation signature verification failed.");
+        }
+        console.log("Packed self-attestation signature verified successfully.");
+        return true;
+    }
+}
+
+/**
+ * Verifies a 'fido-u2f' attestation statement.
+ * @param {object} attStmt - Attestation statement object.
+ * @param {Buffer} authDataBuffer - The raw authenticator data buffer.
+ * @param {Buffer} clientDataHash - SHA256 hash of the clientDataJSON.
+ * @param {object} credentialPublicKeyDetails - Decoded public key details.
+ * @param {Buffer} rpIdHash - SHA256 hash of the RP ID.
+ * @param {Buffer} credentialId - The Credential ID.
+ * @returns {Promise<boolean>} True if verification is successful.
+ * @throws {Error} If verification fails.
+ */
+async function verifyFidoU2fAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails, rpIdHash, credentialId) {
+    console.log("Processing 'fido-u2f' attestation format.");
+    const { sig: u2fSig, x5c: u2fX5c } = attStmt;
+
+    // 1. Verify attStmt structure
+    if (!u2fSig || !Buffer.isBuffer(u2fSig)) {
+        throw new Error("FIDO-U2F attestation statement missing or invalid 'sig'.");
+    }
+    if (!u2fX5c || !Array.isArray(u2fX5c) || u2fX5c.length < 1 || !Buffer.isBuffer(u2fX5c[0])) {
+         throw new Error("FIDO-U2F attestation statement missing or invalid 'x5c' (certificate chain).");
+    }
+    console.log("FIDO-U2F structure validated (sig, x5c[0] present).");
+
+    // --- SECURITY WARNING: SIMPLIFIED IMPLEMENTATION ---
+    // 2. Parse leaf certificate from x5c[0] - SKIPPED.
+    // 3. Extract public key *from the certificate* - SKIPPED.
+    // We are INSECURELY using the public key from authData instead.
+    // A compliant implementation MUST extract the public key from the certificate
+    // and use that for verification. It also MUST validate the certificate chain.
+    // --- END SECURITY WARNING ---
+
+    // Ensure the key from authData is P-256 ECC as required by U2F
+    if (credentialPublicKeyDetails.kty !== COSE_KEY_TYPES.EC2 ||
+        credentialPublicKeyDetails.crv !== COSE_ELLIPTIC_CURVES.P_256 ||
+        credentialPublicKeyDetails.alg !== COSE_ALGORITHMS.ES256) {
+        throw new Error(`FIDO-U2F requires an ES256 P-256 public key in authData, but received different parameters (kty: ${credentialPublicKeyDetails.kty}, crv: ${credentialPublicKeyDetails.crv}, alg: ${credentialPublicKeyDetails.alg})`);
+    }
+
+    // 4. Construct specific U2F verification data buffer
+    // verificationData = 0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F
+    const reservedByte = Buffer.from([0x00]);
+    // Extract the P-256 public key point (uncompressed format: 0x04 || x || y)
+    const publicKeyU2F = Buffer.concat([
+        Buffer.from([0x04]), // Uncompressed point indicator
+        credentialPublicKeyDetails.x,
+        credentialPublicKeyDetails.y
+    ]);
+
+    const verificationData = Buffer.concat([
+        reservedByte,
+        rpIdHash,       // From authData
+        clientDataHash, // Calculated from clientDataJSON
+        credentialId,   // From authData
+        publicKeyU2F    // From authData public key (x, y coordinates)
+    ]);
+    console.log("Constructed U2F verification data.");
+
+    // 5. Verify 'sig' over verificationData using the *authData* public key (INSECURE SHORTCUT)
+    const keyObject = await crypto.subtle.importKey(
+        'jwk',
+        convertCoseKeyToJwk(credentialPublicKeyDetails), // Uses the key from authData
+        getJwkParams(COSE_ALGORITHMS.ES256), // U2F MUST use ES256
+        true,
+        ['verify']
+    );
+
+    const signatureIsValid = await crypto.subtle.verify(
+        getWebCryptoAlgName(COSE_ALGORITHMS.ES256), // U2F MUST use ES256
+        keyObject,
+        u2fSig,
+        verificationData
+    );
+
+    if (!signatureIsValid) {
+        throw new Error("FIDO-U2F signature verification failed (using authData key).");
+    }
+    console.log("FIDO-U2F signature verified successfully (using authData key - INSECURE).");
+
+    // 6. RECOMMENDED: Validate x5c chain against trusted roots - SKIPPED.
+    // Requires a Metadata Service and certificate validation logic.
+
+    return true; // Return true if signature verification passed (with the insecure key)
+}
+
+/**
+ * Verifies a 'tpm' attestation statement.
+ * @returns {Promise<boolean>} True as this is a placeholder.
+ */
+async function verifyTpmAttestation() {
+    console.warn("Attestation format 'tpm' verification is complex and requires TPM-specific knowledge. THIS IS NOT IMPLEMENTED HERE.");
+    return true; // Placeholder
+}
+
+/**
+ * Verifies an 'android-safetynet' attestation statement.
+ * @param {object} attStmt - Attestation statement object.
+ * @param {Buffer} authDataBuffer - The raw authenticator data buffer.
+ * @param {Buffer} clientDataHash - SHA256 hash of the clientDataJSON.
+ * @returns {Promise<boolean>} True if verification is successful.
+ * @throws {Error} If verification fails.
+ */
+async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash) {
+    console.log("Processing 'android-safetynet' attestation format.");
+    const { ver, response: jwsResponseBuffer } = attStmt;
+    
+    if (!ver || typeof ver !== 'string') {
+        throw new Error("Android SafetyNet attestation statement missing or invalid 'ver'.");
+    }
+    
+    if (!jwsResponseBuffer || !Buffer.isBuffer(jwsResponseBuffer)) {
+        throw new Error("Android SafetyNet attestation statement missing or invalid 'response' (JWS).");
+    }
+    
+    console.log("SafetyNet 'ver' and 'response' fields are present.");
+    
+    // The SafetyNet response is a JWS (JSON Web Signature)
+    const jwsString = jwsResponseBuffer.toString('utf8');
+    
+    // --- NONCE VERIFICATION ---
+    // The nonce in the JWS payload MUST be the base64url encoding of SHA256(authenticatorData || clientDataHash)
+    const nonceBuffer = crypto.createHash('sha256').update(Buffer.concat([authDataBuffer, clientDataHash])).digest();
+    const nonceBase64 = nonceBuffer.toString('base64');
+    
+    console.log(`Expected SafetyNet nonce: ${nonceBase64}`);
+    
+    // Decode the JWS to extract the payload and header
+    let decodedJws;
+    try {
+        decodedJws = jwt.decode(jwsString, { complete: true });
+        if (!decodedJws) {
+            throw new Error('Failed to decode JWS.');
+        }
+    } catch (error) {
+        throw new Error(`Error decoding SafetyNet JWS: ${error.message}`);
+    }
+    
+    // Extract and verify the certificate chain from the JWS header
+    const { header, payload, signature } = decodedJws;
+    
+    if (!header.x5c || !Array.isArray(header.x5c) || header.x5c.length === 0) {
+        throw new Error('SafetyNet JWS header missing x5c (certificate chain).');
+    }
+    
+    // The header.x5c contains the certificate chain needed to verify the signature
+    console.log(`SafetyNet JWS contains ${header.x5c.length} certificates in the chain.`);
+    
+    // Extract the leaf certificate (first in the chain)
+    const leafCertDer = Buffer.from(header.x5c[0], 'base64');
+    console.log('Extracted leaf certificate from JWS header.');
+    
+    // Parse the leaf certificate
+    let leafCert;
+    try {
+        // Convert DER to PEM format for Node.js crypto
+        const certPem = '-----BEGIN CERTIFICATE-----\n' +
+            Buffer.from(header.x5c[0], 'base64').toString('base64') +
+            '\n-----END CERTIFICATE-----';
+            
+        // Create an X509Certificate object
+        leafCert = new crypto.X509Certificate(certPem);
+        
+        // Verify the subject contains CN=attest.android.com
+        const subjectCN = leafCert.subject;
+        if (!subjectCN.includes('CN=attest.android.com')) {
+            throw new Error(`SafetyNet leaf certificate has invalid subject: ${subjectCN}. Expected CN=attest.android.com`);
+        }
+        console.log('Leaf certificate subject verified: contains CN=attest.android.com');
+        
+        // In a production environment, you would also:
+        // 1. Verify the certificate chain up to a trusted Google root CA
+        // 2. Check certificate validity period
+        
+    } catch (error) {
+        throw new Error(`Failed to parse or verify SafetyNet certificate: ${error.message}`);
+    }
+    
+    // Verify the JWS signature using the certificate's public key
+    try {
+        // Extract public key from the certificate in PEM format
+        const publicKey = leafCert.publicKey;
+        
+        // Split the JWS into parts
+        const jwsParts = jwsString.split('.');
+        const signedData = jwsParts.slice(0, 2).join('.');
+        const signatureBase64 = jwsParts[2];
+        
+        // Convert the signature from base64 to buffer
+        const signatureBuffer = Buffer.from(signatureBase64, 'base64');
+        
+        // Verify the signature
+        const isValid = crypto.verify(
+            'sha256', // Algorithm - SafetyNet uses RS256 which is RSA with SHA-256
+            Buffer.from(signedData),
+            publicKey,
+            signatureBuffer
+        );
+        
+        if (!isValid) {
+            throw new Error('SafetyNet JWS signature verification failed');
+        }
+        console.log('SafetyNet JWS signature verified successfully with certificate public key');
+        
+    } catch (error) {
+        throw new Error(`Failed to verify SafetyNet JWS signature: ${error.message}`);
+    }
+    
+    // Validate the payload
+    if (!payload.nonce) {
+        throw new Error('SafetyNet response missing nonce.');
+    }
+    
+    // Check if the nonce in the payload matches our expected nonce
+    if (payload.nonce !== nonceBase64) {
+        throw new Error(`Nonce mismatch. Expected: ${nonceBase64}, Got: ${payload.nonce}`);
+    }
+    console.log('SafetyNet nonce verified successfully.');
+    
+    // Verify ctsProfileMatch is true (device passes Android Compatibility Test Suite)
+    if (payload.ctsProfileMatch !== true) {
+        throw new Error('SafetyNet ctsProfileMatch is not true. Device integrity check failed.');
+    }
+    console.log('SafetyNet ctsProfileMatch verified: true.');
+    
+    // Check timestampMs to ensure the attestation is recent
+    const maxAgeMs = 2 * 60 * 1000; // 2 minutes
+    const now = Date.now();
+    if (!payload.timestampMs || typeof payload.timestampMs !== 'number' || 
+        (now - payload.timestampMs) > maxAgeMs) {
+        const age = payload.timestampMs ? ((now - payload.timestampMs) / 1000) + 's' : 'unknown';
+        throw new Error(`SafetyNet attestation too old or invalid timestamp. Age: ${age}`);
+    }
+    console.log(`SafetyNet timestampMs verified (age: ${(now - payload.timestampMs) / 1000}s).`);
+    
+    console.log('Android SafetyNet attestation verification successful.');
+    return true;
 }
 
 
