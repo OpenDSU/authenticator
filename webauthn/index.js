@@ -338,20 +338,77 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
     console.log("Processing 'android-safetynet' attestation format.");
     const { ver, response: jwsResponseBuffer } = attStmt;
     console.log("attStmt", JSON.stringify(attStmt))
-    console.log("ver", ver)
-    console.log("jwsResponseBuffer", jwsResponseBuffer)
-    if (!ver || typeof ver !== 'string') {
-        throw new Error("Android SafetyNet attestation statement missing or invalid 'ver'.");
+
+    // Enhanced debugging for response type
+    console.log("Response type:", typeof jwsResponseBuffer);
+    console.log("Is Buffer?", Buffer.isBuffer(jwsResponseBuffer));
+    console.log("Is Uint8Array?", jwsResponseBuffer instanceof Uint8Array);
+    console.log("Is ArrayBuffer?", jwsResponseBuffer instanceof ArrayBuffer);
+    console.log("Constructor name:", jwsResponseBuffer?.constructor?.name);
+
+    // If it's array-like, log its properties
+    if (jwsResponseBuffer && typeof jwsResponseBuffer === 'object') {
+        console.log("Object keys:", Object.keys(jwsResponseBuffer));
+        console.log("Length:", jwsResponseBuffer.length);
+        // Try to convert to Buffer if it's array-like
+        if (jwsResponseBuffer.length !== undefined) {
+            console.log("First few bytes:", Array.from(jwsResponseBuffer.slice(0, 10)));
+        }
     }
 
-    if (!jwsResponseBuffer || !Buffer.isBuffer(jwsResponseBuffer)) {
-        throw new Error("Android SafetyNet attestation statement missing or invalid 'response' (JWS).");
+    console.log("ver", ver)
+    console.log("jwsResponseBuffer", jwsResponseBuffer)
+
+    // Ensure jwsResponseBuffer is a Buffer, converting if needed
+    let responseBuffer;
+    if (!jwsResponseBuffer) {
+        throw new Error("Android SafetyNet attestation statement missing 'response' (JWS).");
+    } else if (Buffer.isBuffer(jwsResponseBuffer)) {
+        responseBuffer = jwsResponseBuffer;
+    } else if (jwsResponseBuffer instanceof Uint8Array) {
+        // Convert Uint8Array to Buffer
+        responseBuffer = Buffer.from(jwsResponseBuffer);
+        console.log("Converted Uint8Array to Buffer");
+    } else if (jwsResponseBuffer instanceof ArrayBuffer) {
+        // Convert ArrayBuffer to Buffer
+        responseBuffer = Buffer.from(jwsResponseBuffer);
+        console.log("Converted ArrayBuffer to Buffer");
+    } else if (typeof jwsResponseBuffer === 'object' && jwsResponseBuffer.length !== undefined) {
+        // Try to convert array-like object
+        try {
+            responseBuffer = Buffer.from(jwsResponseBuffer);
+            console.log("Converted array-like object to Buffer");
+        } catch (err) {
+            console.error("Failed to convert to Buffer:", err.message);
+            throw new Error("Android SafetyNet attestation statement has invalid 'response' format.");
+        }
+    } else {
+        throw new Error(`Android SafetyNet attestation statement has unexpected 'response' type: ${typeof jwsResponseBuffer}`);
+    }
+
+    // Log what we actually have after conversion
+    console.log("Buffer length:", responseBuffer.length);
+    console.log("Buffer first 50 bytes:", responseBuffer.slice(0, Math.min(50, responseBuffer.length)).toString('hex'));
+
+    // Try to visualize as string if it might be text
+    try {
+        const previewText = responseBuffer.toString('utf8').substring(0, 100);
+        console.log("Buffer as UTF-8 preview:", previewText);
+        if (previewText.startsWith('eyJ')) {
+            console.log("Appears to be base64 encoded (starts with 'eyJ')");
+        }
+    } catch (err) {
+        console.log("Not valid UTF-8 text");
+    }
+
+    if (!ver || typeof ver !== 'string') {
+        throw new Error("Android SafetyNet attestation statement missing or invalid 'ver'.");
     }
 
     console.log("SafetyNet 'ver' and 'response' fields are present.");
 
     // The SafetyNet response is a JWS (JSON Web Signature)
-    const jwsString = jwsResponseBuffer.toString('utf8');
+    const jwsString = responseBuffer.toString('utf8');
 
     // --- NONCE VERIFICATION ---
     // The nonce in the JWS payload MUST be the base64url encoding of SHA256(authenticatorData || clientDataHash)
