@@ -1,6 +1,6 @@
 const crypto = require('crypto');
-const { decode } = require('./cbor/index.js'); 
-const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose/index.js'); 
+const { decode } = require('./cbor/index.js');
+const { decodeCoseKey, COSE_KEY_TYPES, COSE_ALGORITHMS, COSE_ELLIPTIC_CURVES, getWebAuthnPublicKeyDetails } = require('./cose/index.js');
 const { decodeDerEncodedSignature } = require('./utils.js');
 const jwt = require('./jwt');
 
@@ -152,16 +152,16 @@ async function verifyAttestationStatement(fmt, attStmt, authDataBuffer, clientDa
     switch (fmt) {
         case 'none':
             return await verifyNoneAttestation();
-            
+
         case 'packed':
             return await verifyPackedAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails);
-            
+
         case 'fido-u2f':
             return await verifyFidoU2fAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails, rpIdHash, credentialId);
-            
+
         case 'tpm':
             return await verifyTpmAttestation();
-            
+
         case 'android-safetynet':
             return await verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash);
 
@@ -203,7 +203,7 @@ async function verifyPackedAttestation(attStmt, authDataBuffer, clientDataHash, 
 
     if (packedX5c && Array.isArray(packedX5c) && packedX5c.length > 0) {
         // --- Basic/AttCA Attestation ---
-         throw new Error("Packed attestation with x5c (certificate chain) found. Full verification requires certificate parsing, chain validation, and checking against metadata. THIS IS NOT IMPLEMENTED HERE.");
+        throw new Error("Packed attestation with x5c (certificate chain) found. Full verification requires certificate parsing, chain validation, and checking against metadata. THIS IS NOT IMPLEMENTED HERE.");
     } else {
         // --- Self-Attestation ---
         console.log("Attempting Packed Self-Attestation verification.");
@@ -252,7 +252,7 @@ async function verifyFidoU2fAttestation(attStmt, authDataBuffer, clientDataHash,
         throw new Error("FIDO-U2F attestation statement missing or invalid 'sig'.");
     }
     if (!u2fX5c || !Array.isArray(u2fX5c) || u2fX5c.length < 1 || !Buffer.isBuffer(u2fX5c[0])) {
-         throw new Error("FIDO-U2F attestation statement missing or invalid 'x5c' (certificate chain).");
+        throw new Error("FIDO-U2F attestation statement missing or invalid 'x5c' (certificate chain).");
     }
     console.log("FIDO-U2F structure validated (sig, x5c[0] present).");
 
@@ -337,27 +337,29 @@ async function verifyTpmAttestation() {
 async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash) {
     console.log("Processing 'android-safetynet' attestation format.");
     const { ver, response: jwsResponseBuffer } = attStmt;
-    
+    console.log("attStmt", JSON.stringify(attStmt))
+    console.log("ver", ver)
+    console.log("jwsResponseBuffer", jwsResponseBuffer)
     if (!ver || typeof ver !== 'string') {
         throw new Error("Android SafetyNet attestation statement missing or invalid 'ver'.");
     }
-    
+
     if (!jwsResponseBuffer || !Buffer.isBuffer(jwsResponseBuffer)) {
         throw new Error("Android SafetyNet attestation statement missing or invalid 'response' (JWS).");
     }
-    
+
     console.log("SafetyNet 'ver' and 'response' fields are present.");
-    
+
     // The SafetyNet response is a JWS (JSON Web Signature)
     const jwsString = jwsResponseBuffer.toString('utf8');
-    
+
     // --- NONCE VERIFICATION ---
     // The nonce in the JWS payload MUST be the base64url encoding of SHA256(authenticatorData || clientDataHash)
     const nonceBuffer = crypto.createHash('sha256').update(Buffer.concat([authDataBuffer, clientDataHash])).digest();
     const nonceBase64 = nonceBuffer.toString('base64');
-    
+
     console.log(`Expected SafetyNet nonce: ${nonceBase64}`);
-    
+
     // Decode the JWS to extract the payload and header
     let decodedJws;
     try {
@@ -368,21 +370,21 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
     } catch (error) {
         throw new Error(`Error decoding SafetyNet JWS: ${error.message}`);
     }
-    
+
     // Extract and verify the certificate chain from the JWS header
     const { header, payload, signature } = decodedJws;
-    
+
     if (!header.x5c || !Array.isArray(header.x5c) || header.x5c.length === 0) {
         throw new Error('SafetyNet JWS header missing x5c (certificate chain).');
     }
-    
+
     // The header.x5c contains the certificate chain needed to verify the signature
     console.log(`SafetyNet JWS contains ${header.x5c.length} certificates in the chain.`);
-    
+
     // Extract the leaf certificate (first in the chain)
     const leafCertDer = Buffer.from(header.x5c[0], 'base64');
     console.log('Extracted leaf certificate from JWS header.');
-    
+
     // Parse the leaf certificate
     let leafCert;
     try {
@@ -390,38 +392,38 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
         const certPem = '-----BEGIN CERTIFICATE-----\n' +
             Buffer.from(header.x5c[0], 'base64').toString('base64') +
             '\n-----END CERTIFICATE-----';
-            
+
         // Create an X509Certificate object
         leafCert = new crypto.X509Certificate(certPem);
-        
+
         // Verify the subject contains CN=attest.android.com
         const subjectCN = leafCert.subject;
         if (!subjectCN.includes('CN=attest.android.com')) {
             throw new Error(`SafetyNet leaf certificate has invalid subject: ${subjectCN}. Expected CN=attest.android.com`);
         }
         console.log('Leaf certificate subject verified: contains CN=attest.android.com');
-        
+
         // In a production environment, you would also:
         // 1. Verify the certificate chain up to a trusted Google root CA
         // 2. Check certificate validity period
-        
+
     } catch (error) {
         throw new Error(`Failed to parse or verify SafetyNet certificate: ${error.message}`);
     }
-    
+
     // Verify the JWS signature using the certificate's public key
     try {
         // Extract public key from the certificate in PEM format
         const publicKey = leafCert.publicKey;
-        
+
         // Split the JWS into parts
         const jwsParts = jwsString.split('.');
         const signedData = jwsParts.slice(0, 2).join('.');
         const signatureBase64 = jwsParts[2];
-        
+
         // Convert the signature from base64 to buffer
         const signatureBuffer = Buffer.from(signatureBase64, 'base64');
-        
+
         // Verify the signature
         const isValid = crypto.verify(
             'sha256', // Algorithm - SafetyNet uses RS256 which is RSA with SHA-256
@@ -429,43 +431,43 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
             publicKey,
             signatureBuffer
         );
-        
+
         if (!isValid) {
             throw new Error('SafetyNet JWS signature verification failed');
         }
         console.log('SafetyNet JWS signature verified successfully with certificate public key');
-        
+
     } catch (error) {
         throw new Error(`Failed to verify SafetyNet JWS signature: ${error.message}`);
     }
-    
+
     // Validate the payload
     if (!payload.nonce) {
         throw new Error('SafetyNet response missing nonce.');
     }
-    
+
     // Check if the nonce in the payload matches our expected nonce
     if (payload.nonce !== nonceBase64) {
         throw new Error(`Nonce mismatch. Expected: ${nonceBase64}, Got: ${payload.nonce}`);
     }
     console.log('SafetyNet nonce verified successfully.');
-    
+
     // Verify ctsProfileMatch is true (device passes Android Compatibility Test Suite)
     if (payload.ctsProfileMatch !== true) {
         throw new Error('SafetyNet ctsProfileMatch is not true. Device integrity check failed.');
     }
     console.log('SafetyNet ctsProfileMatch verified: true.');
-    
+
     // Check timestampMs to ensure the attestation is recent
     const maxAgeMs = 2 * 60 * 1000; // 2 minutes
     const now = Date.now();
-    if (!payload.timestampMs || typeof payload.timestampMs !== 'number' || 
+    if (!payload.timestampMs || typeof payload.timestampMs !== 'number' ||
         (now - payload.timestampMs) > maxAgeMs) {
         const age = payload.timestampMs ? ((now - payload.timestampMs) / 1000) + 's' : 'unknown';
         throw new Error(`SafetyNet attestation too old or invalid timestamp. Age: ${age}`);
     }
     console.log(`SafetyNet timestampMs verified (age: ${(now - payload.timestampMs) / 1000}s).`);
-    
+
     console.log('Android SafetyNet attestation verification successful.');
     return true;
 }
