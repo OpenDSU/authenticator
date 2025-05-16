@@ -337,8 +337,6 @@ async function verifyTpmAttestation() {
 async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash) {
     console.log("Processing 'android-safetynet' attestation format.");
     const { ver, response: jwsResponseBuffer } = attStmt;
-    console.log("attStmt", JSON.stringify(attStmt))
-
     // Enhanced debugging for response type
     console.log("Response type:", typeof jwsResponseBuffer);
     console.log("Is Buffer?", Buffer.isBuffer(jwsResponseBuffer));
