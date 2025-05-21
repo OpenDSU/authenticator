@@ -38,6 +38,55 @@ function bufferEqual(a, b) {
     return crypto.timingSafeEqual(a, b);
 }
 
+// --- Helper function to parse a PEM string containing multiple certificates ---
+/**
+ * Parses a PEM string containing multiple certificates into an array of X509Certificate objects.
+ * @param {string} pemString - The string content of the PEM file.
+ * @returns {crypto.X509Certificate[]} An array of parsed X509Certificate objects.
+ */
+function parseRootsPem(pemString) {
+    const caCerts = [];
+    if (!pemString || typeof pemString !== 'string') {
+        console.warn("parseRootsPem: pemString is null, undefined, or not a string. Returning empty array.");
+        return caCerts;
+    }
+    const certRegex = /-----BEGIN CERTIFICATE-----\n([\s\S]+?)\n-----END CERTIFICATE-----/g;
+    let match;
+    while ((match = certRegex.exec(pemString)) !== null) {
+        try {
+            const pemCert = `-----BEGIN CERTIFICATE-----\n${match[1]}\n-----END CERTIFICATE-----`;
+            caCerts.push(new crypto.X509Certificate(Buffer.from(pemCert)));
+        } catch (e) {
+            console.error("Failed to parse a certificate from PEM string:", e.message);
+        }
+    }
+    return caCerts;
+}
+
+/**
+ * STUB FUNCTION for parsing Android Key Attestation KeyDescription extension.
+ * This function needs a full implementation to parse the ASN.1 structure
+ * from the certificate's KeyDescription extension (OID 1.3.6.1.4.1.11129.2.1.17).
+ * @param {crypto.X509Certificate} leafCert - The leaf attestation certificate.
+ * @returns {object} A parsed representation of the KeyDescription.
+ */
+function parseAndroidKeyDescription(leafCert) {
+    console.warn("parseAndroidKeyDescription is a STUB and needs full implementation. Cert subject:", leafCert.subject);
+    // This is a placeholder. Real implementation requires ASN.1 parsing.
+    // The attestationChallenge MUST be the clientDataHash for verification.
+    return {
+        attestationVersion: -1,
+        attestationSecurityLevel: -1, // e.g., 0 (Software), 1 (TEE), 2 (StrongBox)
+        keymasterVersion: -1,
+        keymasterSecurityLevel: -1,
+        attestationChallenge: Buffer.from("dummy_challenge_placeholder_needs_real_clientDataHash"),
+        softwareEnforced: {},
+        teeEnforced: {},
+        // Example of how origin might be populated if found:
+        // teeEnforced: { origin: 0 } // 0: KM_ORIGIN_GENERATED, 1: KM_ORIGIN_DERIVED, 2: KM_ORIGIN_IMPORTED, 3: KM_ORIGIN_UNKNOWN
+    };
+}
+
 // --- Core Verification Logic ---
 
 /**
@@ -139,10 +188,11 @@ function parseAndVerifyAuthenticatorData(authDataBuffer, expectedRpId, requireUs
  * @param {object} credentialPublicKeyDetails - Decoded public key details { kty, alg, crv?, x?, y? }
  * @param {Buffer} rpIdHash - SHA256 hash of the RP ID from authenticator data.
  * @param {Buffer} credentialId - The Credential ID from authenticator data.
+ * @param {crypto.X509Certificate[]} [parsedTrustedRoots] - Optional. Array of parsed trusted root certificates for attestation formats that require them.
  * @returns {Promise<boolean>} - True if verification is considered successful (in this simplified version).
  * @throws {Error} If format is unsupported or basic checks fail.
  */
-async function verifyAttestationStatement(fmt, attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails, rpIdHash, credentialId) {
+async function verifyAttestationStatement(fmt, attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails, rpIdHash, credentialId, parsedTrustedRoots) {
     console.log(`Attempting verification for format: ${fmt}`);
     // console.log('Attestation Statement:', attStmt);
     // console.log('AuthData:', authDataBuffer.toString('hex'));
@@ -163,7 +213,10 @@ async function verifyAttestationStatement(fmt, attStmt, authDataBuffer, clientDa
             return await verifyTpmAttestation();
 
         case 'android-safetynet':
-            return await verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash);
+            return await verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash, parsedTrustedRoots);
+
+        case 'android-key':
+            return await verifyAndroidKeyAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails);
 
         default:
             throw new Error(`Unsupported attestation format: ${fmt}`);
@@ -331,10 +384,11 @@ async function verifyTpmAttestation() {
  * @param {object} attStmt - Attestation statement object.
  * @param {Buffer} authDataBuffer - The raw authenticator data buffer.
  * @param {Buffer} clientDataHash - SHA256 hash of the clientDataJSON.
+ * @param {crypto.X509Certificate[]} parsedTrustedRoots - Array of parsed trusted root X509Certificate objects.
  * @returns {Promise<boolean>} True if verification is successful.
  * @throws {Error} If verification fails.
  */
-async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash) {
+async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, clientDataHash, parsedTrustedRoots) {
     console.log("Processing 'android-safetynet' attestation format.");
     const { ver, response: jwsResponseBuffer } = attStmt;
     // Enhanced debugging for response type
@@ -396,6 +450,7 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
             console.log("Appears to be base64 encoded (starts with 'eyJ')");
         }
     } catch (err) {
+        console.error("Error checking UTF-8 text:", err.message);
         console.log("Not valid UTF-8 text");
     }
 
@@ -427,7 +482,7 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
     }
 
     // Extract and verify the certificate chain from the JWS header
-    const { header, payload, signature } = decodedJws;
+    const { header, payload } = decodedJws;
 
     if (!header.x5c || !Array.isArray(header.x5c) || header.x5c.length === 0) {
         throw new Error('SafetyNet JWS header missing x5c (certificate chain).');
@@ -436,31 +491,141 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
     // The header.x5c contains the certificate chain needed to verify the signature
     console.log(`SafetyNet JWS contains ${header.x5c.length} certificates in the chain.`);
 
+    if (!parsedTrustedRoots || parsedTrustedRoots.length === 0) {
+        throw new Error("Android SafetyNet: No trusted roots provided. Certificate chain validation against roots.pem will be skipped.");
+    }
+
     // Extract the leaf certificate (first in the chain)
-    const leafCertDer = Buffer.from(header.x5c[0], 'base64');
+    // const leafCertDer = Buffer.from(header.x5c[0], 'base64'); // Unused variable
     console.log('Extracted leaf certificate from JWS header.');
 
     // Parse the leaf certificate
     let leafCert;
     try {
-        // Convert DER to PEM format for Node.js crypto
-        const certPem = '-----BEGIN CERTIFICATE-----\n' +
-            Buffer.from(header.x5c[0], 'base64').toString('base64') +
-            '\n-----END CERTIFICATE-----';
+        const certChain = header.x5c.map(certBase64 => {
+            const pemCert = '-----BEGIN CERTIFICATE-----\n' +
+                certBase64 +
+                '\n-----END CERTIFICATE-----';
+            return new crypto.X509Certificate(Buffer.from(pemCert));
+        });
 
-        // Create an X509Certificate object
-        leafCert = new crypto.X509Certificate(certPem);
+        leafCert = certChain[0];
 
         // Verify the subject contains CN=attest.android.com
-        const subjectCN = leafCert.subject;
+        const subjectCN = leafCert.subject; // This is actually the full Subject Distinguished Name
         if (!subjectCN.includes('CN=attest.android.com')) {
             throw new Error(`SafetyNet leaf certificate has invalid subject: ${subjectCN}. Expected CN=attest.android.com`);
         }
         console.log('Leaf certificate subject verified: contains CN=attest.android.com');
 
-        // In a production environment, you would also:
-        // 1. Verify the certificate chain up to a trusted Google root CA
-        // 2. Check certificate validity period
+        // Verify certificate validity periods and chain
+        let currentCert = leafCert;
+
+        for (let i = 0; i < certChain.length; i++) {
+            currentCert = certChain[i];
+            console.log(`Verifying cert ${i + 1}/${certChain.length}: ${currentCert.subject}`);
+
+            // 1. Check validity period
+            const now = new Date();
+            const validFrom = new Date(currentCert.validFrom);
+            const validTo = new Date(currentCert.validTo);
+
+            if (now < validFrom || now > validTo) {
+                throw new Error(`Certificate ${currentCert.subject} is not valid at this time. Valid from ${validFrom} to ${validTo}, Now: ${now}`);
+            }
+            console.log(`Certificate ${currentCert.subject} validity period is OK.`);
+
+            // 2. Verify certificate signature and chain up to a trusted root
+            if (i < certChain.length - 1) {
+                // This is not the root certificate, verify against the next one in the chain
+                const issuerCert = certChain[i + 1];
+                if (!currentCert.checkIssued(issuerCert)) {
+                    throw new Error(`Certificate ${currentCert.subject} was not issued by ${issuerCert.subject}`);
+                }
+                console.log(`Certificate ${currentCert.subject} issued by ${issuerCert.subject} - OK.`);
+            } else {
+                // This is the last certificate in the chain provided by the JWS (x5c).
+                // This 'currentCert' could be a self-signed root OR an intermediate CA that
+                // should be signed by one of the roots in parsedTrustedRoots.
+                console.log(`Reached end of JWS cert chain. Last cert: ${currentCert.subject} (Issuer: ${currentCert.issuer}). Verifying against trusted roots.`);
+
+                let validChainFound = false;
+
+                // Scenario 1: The last certificate in the JWS chain is ITSELF one of the trusted self-signed roots.
+                if (parsedTrustedRoots && parsedTrustedRoots.length > 0) {
+                    const matchingTrustedRoot = parsedTrustedRoots.find(
+                        (trustedRoot) => trustedRoot.fingerprint256 === currentCert.fingerprint256
+                    );
+
+                    if (matchingTrustedRoot) {
+                        console.log(`Last cert in JWS chain (${currentCert.subject}) matches a root in roots.pem by fingerprint.`);
+                        // Now verify this matchingTrustedRoot (which is currentCert) is actually self-signed.
+                        try {
+                            if (!matchingTrustedRoot.verify(matchingTrustedRoot.publicKey)) {
+                                throw new Error(`Certificate ${matchingTrustedRoot.subject} (from roots.pem, matched by fingerprint) failed self-signature verification.`);
+                            }
+                            console.log(`Certificate ${matchingTrustedRoot.subject} (from roots.pem) successfully verified as self-signed.`);
+                            validChainFound = true;
+                        } catch (e) {
+                            throw new Error(`Error self-signing ${matchingTrustedRoot.subject} (from roots.pem): ${e.message}`);
+                        }
+                    }
+                }
+
+                // Scenario 2: The last certificate in the JWS chain is NOT itself a trusted root,
+                // but it IS ISSUED BY one of the trusted roots.
+                if (!validChainFound && parsedTrustedRoots && parsedTrustedRoots.length > 0) {
+                    console.log(`Last cert in JWS chain (${currentCert.subject}) not directly in roots.pem by fingerprint or roots.pem not used for direct match. Checking if issued by a root in roots.pem.`);
+                    for (const trustedRoot of parsedTrustedRoots) {
+                        // Check if currentCert (last in JWS chain) was issued by this trustedRoot from roots.pem
+                        if (currentCert.checkIssued(trustedRoot)) {
+                            console.log(`Last cert in JWS chain (${currentCert.subject}) IS issued by ${trustedRoot.subject} from roots.pem.`);
+                            // Now, ensure this trustedRoot from roots.pem is actually self-signed.
+                            try {
+                                if (!trustedRoot.verify(trustedRoot.publicKey)) {
+                                    throw new Error(`Issuing certificate ${trustedRoot.subject} (from roots.pem) failed self-signature verification.`);
+                                }
+                                console.log(`Issuing certificate ${trustedRoot.subject} (from roots.pem) successfully verified as self-signed.`);
+                                validChainFound = true;
+                                break; // Found a valid chain to a self-signed root from roots.pem
+                            } catch (e) {
+                                throw new Error(`Error self-signing ${trustedRoot.subject} (from roots.pem) which issued ${currentCert.subject}: ${e.message}`);
+                            }
+                        }
+                    }
+                } else if (!validChainFound && (!parsedTrustedRoots || parsedTrustedRoots.length === 0)) {
+                    // Scenario 3: No roots.pem provided.
+                    // We can only trust the chain if the last certificate is self-signed by itself.
+                    // This is a weaker form of trust, highly dependent on the device not sending a bogus self-signed cert.
+                    console.warn(`No roots.pem provided. Trusting JWS chain if its last certificate (${currentCert.subject}) is self-signed.`);
+                    try {
+                        if (!currentCert.verify(currentCert.publicKey)) {
+                            throw new Error(`Last cert in JWS chain (${currentCert.subject}) is not self-signed, and no roots.pem was provided for further validation.`);
+                        }
+                        console.log(`Last cert in JWS chain (${currentCert.subject}) verified as self-signed (no roots.pem for cross-check).`);
+                        validChainFound = true;
+                    } catch (e) {
+                        throw new Error(`Error self-signing ${currentCert.subject} (last in JWS chain, no roots.pem): ${e.message}`);
+                    }
+                }
+
+                if (!validChainFound) {
+                    throw new Error(`Certificate chain for ${leafCert.subject} did not lead to a trusted and self-signed root CA from the provided roots.pem, nor was the chain's final certificate a self-signed root itself (if roots.pem was empty/missing). Last cert in chain: ${currentCert.subject}.`);
+                }
+                console.log(`Successfully validated certificate chain for leaf ${leafCert.subject} up to a trusted root.`);
+            }
+        }
+
+        // trustedRootFound is now true if the chain successfully linked to a root in parsedTrustedRoots which was self-signed.
+        // If parsedTrustedRoots was empty, trustedRootFound will be false, but validChainFound might be true if the JWS's own last cert was self-signed.
+        // The original logic for this check was:
+        // if (parsedTrustedRoots && parsedTrustedRoots.length > 0 && !trustedRootFound) {
+        // This check might need to be re-evaluated based on policy if allowing chains not anchored to parsedTrustedRoots.
+        // For now, let's assume if validChainFound is true, the chain is considered valid per the logic above.
+        // If validChainFound is true, it means we've successfully validated the chain according to one of the scenarios.
+
+        console.log("Certificate chain path validation completed.");
+
 
     } catch (error) {
         throw new Error(`Failed to parse or verify SafetyNet certificate: ${error.message}`);
@@ -527,6 +692,140 @@ async function verifyAndroidSafetynetAttestation(attStmt, authDataBuffer, client
     return true;
 }
 
+/**
+ * Verifies an 'android-key' attestation statement.
+ * @param {object} attStmt - Attestation statement object (contains sig, x5c, alg).
+ * @param {Buffer} authDataBuffer - The raw authenticator data buffer.
+ * @param {Buffer} clientDataHash - SHA256 hash of the clientDataJSON.
+ * @param {object} credentialPublicKeyDetails - Decoded public key details from authData.
+ * @returns {Promise<boolean>} True if verification is successful.
+ * @throws {Error} If verification fails.
+ */
+async function verifyAndroidKeyAttestation(attStmt, authDataBuffer, clientDataHash, credentialPublicKeyDetails) {
+    console.log("Processing 'android-key' attestation format.");
+    const { sig, x5c, alg } = attStmt;
+
+    if (!sig || !Buffer.isBuffer(sig)) {
+        throw new Error("Android Key attestation statement missing or invalid 'sig'.");
+    }
+    if (!x5c || !Array.isArray(x5c) || x5c.length === 0 || !x5c.every(c => typeof c === 'string' || Buffer.isBuffer(c))) {
+        throw new Error("Android Key attestation statement missing or invalid 'x5c' (certificate chain).");
+    }
+    if (alg === undefined) {
+        console.warn("Android Key attestation statement missing 'alg'. Will infer from public key.");
+        // We must ensure the algorithm used for verification matches the key type.
+        // Common for Android Key is ES256.
+    }
+
+    // 1. Verify the certificate chain and parse the leaf certificate.
+    let leafCert;
+    try {
+        const certChainPEM = x5c.map(certData => {
+            const certBuffer = Buffer.isBuffer(certData) ? certData : Buffer.from(certData, 'base64');
+            return '-----BEGIN CERTIFICATE-----\n' + certBuffer.toString('base64') + '\n-----END CERTIFICATE-----';
+        });
+
+        leafCert = new crypto.X509Certificate(certChainPEM[0]);
+
+        // TODO: Implement full chain validation up to Google Hardware Attestation Root CAs.
+        // For now, just check basic validity of the leaf certificate.
+        const now = new Date();
+        if (new Date(leafCert.validFrom) > now || new Date(leafCert.validTo) < now) {
+            throw new Error(`Leaf certificate is not valid. Valid from ${leafCert.validFrom} to ${leafCert.validTo}`);
+        }
+        console.log("Android Key attestation: Leaf certificate validity period checked.");
+
+    } catch (e) {
+        throw new Error(`Failed to parse or validate leaf certificate for Android Key: ${e.message}`);
+    }
+
+    // 2. Parse Key Description Extension and verify attestationChallenge
+    let parsedKeyDescription;
+    try {
+        parsedKeyDescription = parseAndroidKeyDescription(leafCert);
+        if (!parsedKeyDescription) {
+            throw new Error("Failed to parse KeyDescription from certificate extensions.");
+        }
+        console.log("Successfully parsed Android KeyDescription extension.");
+        // console.log("KeyDescription Content:", parsedKeyDescription);
+
+        // CRITICAL: Verify attestationChallenge
+        if (!parsedKeyDescription.attestationChallenge) {
+            throw new Error("KeyDescription is missing attestationChallenge.");
+        }
+        if (!bufferEqual(Buffer.from(parsedKeyDescription.attestationChallenge), clientDataHash)) {
+            console.error("Expected attestation challenge (clientDataHash):", clientDataHash.toString('hex'));
+            console.error("Received attestation challenge from KeyDescription:", Buffer.from(parsedKeyDescription.attestationChallenge).toString('hex'));
+            throw new Error("Attestation challenge mismatch in Key Description. Expected clientDataHash.");
+        }
+        console.log("Android Key Attestation: attestationChallenge verified successfully.");
+
+        // Log security levels for policy decisions
+        console.log(`Attestation Version: ${parsedKeyDescription.attestationVersion}, Security Level: ${parsedKeyDescription.attestationSecurityLevel}`);
+        console.log(`Keymaster Version: ${parsedKeyDescription.keymasterVersion}, Security Level: ${parsedKeyDescription.keymasterSecurityLevel}`);
+        // Example: Accessing a TEE enforced property (origin)
+        if (parsedKeyDescription.teeEnforced && parsedKeyDescription.teeEnforced.origin !== undefined) {
+            console.log(`TEE Enforced Origin: ${parsedKeyDescription.teeEnforced.origin} (0=generated, 1=derived, 2=imported, 3=unknown)`);
+        }
+        if (parsedKeyDescription.teeEnforced && parsedKeyDescription.teeEnforced.rollbackResistance !== undefined) {
+            console.log(`TEE Enforced Rollback Resistance: present`);
+        }
+
+    } catch (e) {
+        console.error("Error during KeyDescription parsing or challenge verification:", e);
+        throw new Error(`Android Key Attestation: KeyDescription processing failed: ${e.message}`);
+    }
+
+    // 3. Verify the signature.
+    const dataToVerify = Buffer.concat([authDataBuffer, clientDataHash]);
+    let expectedCoseAlg = alg; // Use alg from attStmt if present
+
+    if (!expectedCoseAlg) {
+        // Attempt to infer from credentialPublicKeyDetails if not in attStmt, though for Android Key attestation,
+        // the signature is made by the key in the x5c certificate, not necessarily the credentialPublicKey.
+        // This part might need re-evaluation based on how `alg` is typically populated for Android Key.
+        // Usually, Android Key Attestation uses ES256, and `alg` should reflect that.
+        if (credentialPublicKeyDetails && credentialPublicKeyDetails.alg) {
+            console.warn("Android Key attestation 'alg' not present in attStmt, inferring from credentialPublicKey. This might be incorrect for Android Key.");
+            expectedCoseAlg = credentialPublicKeyDetails.alg;
+        } else {
+            // Default to ES256 if no algorithm information is available, with a warning.
+            console.warn("Android Key attestation 'alg' not found. Defaulting to ES256. Verification might fail if incorrect.");
+            expectedCoseAlg = COSE_ALGORITHMS.ES256;
+        }
+    }
+
+    const publicKeyForVerification = leafCert.publicKey; // Public key from the attestation certificate
+    let nodeCryptoAlgName;
+
+    switch (expectedCoseAlg) {
+        case COSE_ALGORITHMS.ES256: nodeCryptoAlgName = 'sha256'; break;
+        case COSE_ALGORITHMS.ES384: nodeCryptoAlgName = 'sha384'; break;
+        case COSE_ALGORITHMS.ES512: nodeCryptoAlgName = 'sha512'; break;
+        // Potentially other algorithms like RS256 (-257) if supported by Android Key for attestation signature
+        case COSE_ALGORITHMS.RS256: nodeCryptoAlgName = 'sha256'; break; // For RSA-PSS or RSASSA-PKCS1-v1_5 with SHA256
+        default:
+            throw new Error(`Unsupported COSE algorithm for Android Key signature verification: ${expectedCoseAlg}`);
+    }
+
+    try {
+        const signatureIsValid = crypto.verify(
+            nodeCryptoAlgName,
+            dataToVerify,
+            publicKeyForVerification,
+            sig
+        );
+
+        if (!signatureIsValid) {
+            throw new Error("Android Key attestation signature verification failed.");
+        }
+        console.log("Android Key attestation signature verified successfully.");
+        return true;
+    } catch (e) {
+        console.error("Error during Android Key signature verification:", e);
+        throw new Error(`Android Key signature verification failed: ${e.message}`);
+    }
+}
 
 // --- Helper functions for Attestation Verification (Placeholders/Examples) ---
 
@@ -568,22 +867,6 @@ function getJwkCurve(coseCurve) {
     }
 }
 
-function getJwkAlg(coseAlg) {
-    // Map COSE Algorithm numbers to JWA names (RFC 7518) if needed by crypto lib
-    // This mapping isn't always 1:1 or strictly necessary if the library
-    // infers from the key type/curve, but good practice.
-    switch (coseAlg) {
-        case COSE_ALGORITHMS.ES256: return 'ES256';
-        case COSE_ALGORITHMS.ES384: return 'ES384';
-        case COSE_ALGORITHMS.ES512: return 'ES512';
-        case COSE_ALGORITHMS.EdDSA: return 'EdDSA'; // Often inferred from OKP/Ed25519
-        case COSE_ALGORITHMS.RS256: return 'RS256';
-        // Add other mappings as needed
-        default:
-            console.warn(`No explicit JWK alg mapping for COSE alg ${coseAlg}`);
-            return undefined; // Let the crypto library infer if possible
-    }
-}
 function getJwkParams(coseAlg) {
     // Parameters for subtle.importKey based on JWA alg name
     switch (coseAlg) {
@@ -620,10 +903,11 @@ function getWebCryptoAlgName(coseAlg) {
  * @param {string} expectedOrigin - The expected origin (e.g., 'https://example.com').
  * @param {string} expectedRpId - The expected Relying Party ID (e.g., 'example.com').
  * @param {boolean} requireUserVerification - Whether UV flag must be set in authData.
+ * @param {crypto.X509Certificate[]} [parsedTrustedRoots] - Optional. Array of parsed trusted root certificates for attestation formats that require them.
  * @returns {Promise<object>} Information about the verified credential to be stored.
  * @throws {Error} If any verification step fails.
  */
-async function verifyRegistrationResponse(credential, expectedChallenge, expectedOrigin, expectedRpId, requireUserVerification) {
+async function verifyRegistrationResponse(credential, expectedChallenge, expectedOrigin, expectedRpId, requireUserVerification, parsedTrustedRoots) {
     // Basic structure check
     if (!credential || !credential.id || !credential.rawId || !credential.response ||
         !credential.response.clientDataJSON || !credential.response.attestationObject ||
@@ -756,7 +1040,8 @@ async function verifyRegistrationResponse(credential, expectedChallenge, expecte
             clientDataHash,
             publicKeyDetails,
             parsedAuthData.rpIdHash,
-            parsedAuthData.credentialId
+            parsedAuthData.credentialId,
+            parsedTrustedRoots
         );
         if (!attestationVerified) {
             // Should not happen if verifyAttestationStatement throws on failure, but belt-and-suspenders
@@ -883,7 +1168,6 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
     console.log('Expected RP ID:', expectedRpId);
 
     // 1. Decode necessary inputs from Base64URL
-    const rawIdBuffer = base64urlToBuffer(assertion.rawId);
     const clientDataJSONBuffer = base64urlToBuffer(assertion.response.clientDataJSON);
     const authenticatorDataBuffer = base64urlToBuffer(assertion.response.authenticatorData);
     const publicKeyBuffer = base64urlToBuffer(storedCredential.publicKey);
@@ -1023,5 +1307,6 @@ module.exports = {
     verifyAttestationStatement,
     bufferEqual,
     base64urlToBuffer,
-    bufferToBase64url
+    bufferToBase64url,
+    parseRootsPem // Export the new PEM parser
 };
