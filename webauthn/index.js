@@ -110,9 +110,15 @@ function parseAndVerifyAuthenticatorData(authDataBuffer, expectedRpId, requireUs
     if (expectedRpId) {
         const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
         if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
-            throw new Error(`RP ID hash mismatch. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+            // If direct match fails, also try with "www." prefix
+            const wwwExpectedRpIdHash = crypto.createHash('sha256').update(`www.${expectedRpId}`).digest();
+            if (!bufferEqual(rpIdHash, wwwExpectedRpIdHash)) {
+                throw new Error(`RP ID hash mismatch. Expected ${expectedRpIdHash.toString('hex')} or ${wwwExpectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+            }
+            console.log('RP ID hash verified (with www prefix).');
+        } else {
+            console.log('RP ID hash verified.');
         }
-        console.log('RP ID hash verified.');
     } else {
         console.log('Skipping RP ID hash verification as expectedRpId was not provided.');
     }
@@ -1098,9 +1104,15 @@ function parseAssertionAuthenticatorData(authDataBuffer, expectedRpId, requireUs
     if (expectedRpId) {
         const expectedRpIdHash = crypto.createHash('sha256').update(expectedRpId).digest();
         if (!bufferEqual(rpIdHash, expectedRpIdHash)) {
-            throw new Error(`RP ID hash mismatch during assertion. Expected ${expectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+            // If direct match fails, also try with "www." prefix
+            const wwwExpectedRpIdHash = crypto.createHash('sha256').update(`www.${expectedRpId}`).digest();
+            if (!bufferEqual(rpIdHash, wwwExpectedRpIdHash)) {
+                throw new Error(`RP ID hash mismatch during assertion. Expected ${expectedRpIdHash.toString('hex')} or ${wwwExpectedRpIdHash.toString('hex')} but got ${rpIdHash.toString('hex')}`);
+            }
+            console.log('Assertion RP ID hash verified (with www prefix).');
+        } else {
+            console.log('Assertion RP ID hash verified.');
         }
-        console.log('Assertion RP ID hash verified.');
     } else {
         console.log('Skipping assertion RP ID hash verification as expectedRpId was not provided.');
     }
