@@ -962,10 +962,15 @@ async function verifyRegistrationResponse(credential, expectedChallenge, expecte
     // Compare origin
     if (expectedOrigin) {
         if (clientData.origin !== expectedOrigin) {
-            // Handle variations like port numbers if necessary
-            throw new Error(`Origin mismatch. Expected '${expectedOrigin}', got '${clientData.origin}'`);
+            // If direct match fails, also try with "www." prefix for the expected origin
+            const wwwExpectedOrigin = expectedOrigin.replace(/^https?:\/\//, '$&www.');
+            if (clientData.origin !== wwwExpectedOrigin) {
+                throw new Error(`Origin mismatch. Expected '${expectedOrigin}' or '${wwwExpectedOrigin}', got '${clientData.origin}'`);
+            }
+            console.log('Origin verified (with www prefix).');
+        } else {
+            console.log('Origin verified.');
         }
-        console.log('Origin verified.');
     } else {
         console.log('Skipping origin verification as expectedOrigin was not provided.');
     }
@@ -1216,9 +1221,15 @@ async function verifyAssertionResponse(assertion, storedCredential, expectedChal
 
     // Compare origin
     if (clientData.origin !== expectedOrigin) {
-        throw new Error(`Origin mismatch. Expected '${expectedOrigin}', got '${clientData.origin}'`);
+        // If direct match fails, also try with "www." prefix for the expected origin
+        const wwwExpectedOrigin = expectedOrigin.replace(/^https?:\/\//, '$&www.');
+        if (clientData.origin !== wwwExpectedOrigin) {
+            throw new Error(`Origin mismatch. Expected '${expectedOrigin}' or '${wwwExpectedOrigin}', got '${clientData.origin}'`);
+        }
+        console.log('Origin verified (with www prefix).');
+    } else {
+        console.log('Origin verified.');
     }
-    console.log('Origin verified.');
 
     // 3. Parse authenticatorData
     console.log('\n--- Verifying authenticatorData ---');
